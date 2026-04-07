@@ -6,6 +6,8 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Arrow Time">
+    <link rel="icon" href="https://static.wixstatic.com/media/c1efbc_f368d988ccbe415cb9c913b9ccaf5ad7~mv2.png">
+    <link rel="apple-touch-icon" href="https://static.wixstatic.com/media/c1efbc_f368d988ccbe415cb9c913b9ccaf5ad7~mv2.png">
     <title>Arrow Time Logs</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
@@ -33,7 +35,6 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
         
-        // Safely extract Lucide Icons with smart fallbacks to handle library version renames
         const LucideIcons = window.LucideReact || window.lucideReact || window.lucide;
         
         const Clock = LucideIcons.Clock;
@@ -55,17 +56,53 @@
         const ChevronDown = LucideIcons.ChevronDown;
         const ChevronRight = LucideIcons.ChevronRight;
         
-        // Smart fallbacks for icons that were recently renamed in Lucide
         const CheckCircle = LucideIcons.CircleCheck || LucideIcons.CheckCircle2 || LucideIcons.CheckCircle;
         const Edit = LucideIcons.Pencil || LucideIcons.Edit2 || LucideIcons.Edit;
         const Trash = LucideIcons.Trash2 || LucideIcons.Trash;
         const Loader = LucideIcons.Loader2 || LucideIcons.Loader;
 
-        // Paste your Google Web App URL here
         const API_URL = 'https://script.google.com/macros/s/AKfycbyqYRawldjJkfUVAVcn7kkBmhDnWckbthBRlC7rmfG9SgBgBCNCeTYJ_6Koa93PhF0/exec';
 
+        // --- HARDWARE FEEDBACK ENGINE (Audio + Haptics) ---
+        const Feedback = {
+          audioCtx: null,
+          playTone(freq, type, duration, vol) {
+            try {
+              if (!this.audioCtx) {
+                this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+              }
+              if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+              
+              const osc = this.audioCtx.createOscillator();
+              const gain = this.audioCtx.createGain();
+              osc.type = type;
+              osc.frequency.setValueAtTime(freq, this.audioCtx.currentTime);
+              gain.gain.setValueAtTime(vol, this.audioCtx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + duration);
+              
+              osc.connect(gain);
+              gain.connect(this.audioCtx.destination);
+              osc.start();
+              osc.stop(this.audioCtx.currentTime + duration);
+            } catch (e) { /* Ignore audio initialization errors on strict devices */ }
+          },
+          tap() {
+            this.playTone(1000, 'triangle', 0.015, 0.05); // Tuned for a sharp "click" sound
+            if (navigator.vibrate) navigator.vibrate(10);
+          },
+          success() {
+            this.playTone(600, 'sine', 0.1, 0.05);
+            setTimeout(() => this.playTone(800, 'sine', 0.2, 0.05), 100);
+            if (navigator.vibrate) navigator.vibrate([15, 40, 15]);
+          },
+          error() {
+            this.playTone(300, 'square', 0.15, 0.05);
+            setTimeout(() => this.playTone(200, 'square', 0.25, 0.05), 150);
+            if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
+          }
+        };
+
         function ArtisanKiosk() {
-          // --- APP STATE ---
           const [view, setView] = useState('HOME'); 
           
           const [jobs, setJobs] = useState([]);
@@ -73,7 +110,6 @@
           const [userStatuses, setUserStatuses] = useState({});
           const [isLoadingData, setIsLoadingData] = useState(true);
 
-          // Global Auth State
           const [isGlobalUnlocked, setIsGlobalUnlocked] = useState(false);
           const [globalPin, setGlobalPin] = useState('');
           
@@ -83,6 +119,7 @@
           
           const [successMessage, setSuccessMessage] = useState('');
           const [actionJob, setActionJob] = useState(null); 
+          const [actionError, setActionError] = useState(null);
           
           const [searchTerm, setSearchTerm] = useState('');
           
@@ -91,22 +128,23 @@
           const [isVerifyingPin, setIsVerifyingPin] = useState(false);
           const [pendingAction, setPendingAction] = useState(null); 
           
-          // User Data State
           const [userStatus, setUserStatus] = useState({ isClockedIn: false }); 
           const [userLogs, setUserLogs] = useState([]); 
           const [expandedDates, setExpandedDates] = useState({});
           
           const [isSubmitting, setIsSubmitting] = useState(false);
           
-          // Inline Editing & Delete States
           const [editingLogId, setEditingLogId] = useState(null);
           const [editForm, setEditForm] = useState({ jobId: '', timeIn: '', timeOut: '' });
           const [confirmDeleteId, setConfirmDeleteId] = useState(null);
           
+          const [addingLogDate, setAddingLogDate] = useState(null);
+          const [addForm, setAddForm] = useState({ jobId: '', timeIn: '', timeOut: '' });
+          const [prefillDate, setPrefillDate] = useState(''); 
+          
           const [currentTime, setCurrentTime] = useState(new Date());
           const timeoutRef = useRef(null);
 
-          // --- INITIAL DATA FETCH ---
           useEffect(() => {
             const savedTime = localStorage.getItem('arrowGlobalTime');
             const savedPin = localStorage.getItem('arrowGlobalPin');
@@ -132,14 +170,42 @@
               .then(res => res.json())
               .then(data => {
                 if (data.status === 'success') {
-                  if (data.jobs) setJobs(data.jobs.sort((a, b) => b.id.localeCompare(a.id)));
+                  if (data.jobs) {
+                    const sortedJobs = data.jobs.sort((a, b) => {
+                      const idA = a.id.toUpperCase();
+                      const idB = b.id.toUpperCase();
+                      const nameA = a.name.toUpperCase();
+                      const nameB = b.name.toUpperCase();
+                      
+                      const isShopA = idA.includes('SHOP') || nameA.includes('SHOP') || nameA.includes('OVERHEAD');
+                      const isShopB = idB.includes('SHOP') || nameB.includes('SHOP') || nameB.includes('OVERHEAD');
+                      if (isShopA && !isShopB) return -1;
+                      if (!isShopA && isShopB) return 1;
+                      
+                      const isJA = idA.startsWith('J');
+                      const isJB = idB.startsWith('J');
+                      if (isJA && !isJB) return -1;
+                      if (!isJA && isJB) return 1;
+                      
+                      const isMA = idA.startsWith('M');
+                      const isMB = idB.startsWith('M');
+                      if (isMA && !isMB) return -1;
+                      if (!isMA && isMB) return 1;
+                      
+                      return idB.localeCompare(idA);
+                    });
+                    setJobs(sortedJobs);
+                  }
                   if (data.users) setUsers(data.users);
                   if (data.userStatuses) setUserStatuses(data.userStatuses);
                   setIsGlobalUnlocked(true);
                   localStorage.setItem('arrowGlobalPin', activePin);
                   localStorage.setItem('arrowGlobalTime', Date.now().toString());
                 } else {
-                  if (!isBackground) setPinError(true);
+                  if (!isBackground) {
+                    setPinError(true);
+                    Feedback.error();
+                  }
                   setIsGlobalUnlocked(false);
                   localStorage.removeItem('arrowGlobalPin');
                   localStorage.removeItem('arrowGlobalTime');
@@ -169,27 +235,42 @@
             }
           };
 
-          // --- CLOCK & TIMEOUT EFFECTS ---
           useEffect(() => {
             const timer = setInterval(() => setCurrentTime(new Date()), 1000);
             return () => clearInterval(timer);
           }, []);
 
-          const resetInactivityTimer = () => {
-            if (timeoutRef.current) clearTimeout(timeoutRef.current);
-            if (view !== 'HOME') {
-              timeoutRef.current = setTimeout(() => {
-                resetKiosk();
-              }, 60000); 
-            }
-          };
-
           useEffect(() => {
-            resetInactivityTimer();
-            return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
-          }, [view, enteredPin, searchTerm, editForm]);
+            const handleActivity = () => {
+              if (timeoutRef.current) clearTimeout(timeoutRef.current);
+              
+              if (view !== 'HOME') {
+                timeoutRef.current = setTimeout(() => {
+                  resetKiosk();
+                }, 30000); 
+              }
+            };
 
-          // --- MY LOGS ACCORDION AUTO-EXPAND ---
+            handleActivity();
+
+            if (view !== 'HOME') {
+              window.addEventListener('mousemove', handleActivity);
+              window.addEventListener('keydown', handleActivity);
+              window.addEventListener('touchstart', handleActivity);
+              window.addEventListener('click', handleActivity);
+              window.addEventListener('scroll', handleActivity, true);
+            }
+
+            return () => {
+              window.removeEventListener('mousemove', handleActivity);
+              window.removeEventListener('keydown', handleActivity);
+              window.removeEventListener('touchstart', handleActivity);
+              window.removeEventListener('click', handleActivity);
+              window.removeEventListener('scroll', handleActivity, true);
+              if (timeoutRef.current) clearTimeout(timeoutRef.current);
+            };
+          }, [view]);
+
           useEffect(() => {
             if (view === 'MY_LOGS') {
               const todayLabel = formatHeaderDate(new Date().toLocaleDateString('en-US'));
@@ -197,7 +278,6 @@
             }
           }, [view]);
 
-          // --- ACTIONS ---
           const resetKiosk = () => {
             setSelectedUser(null);
             setActiveUser(null);
@@ -208,6 +288,9 @@
             setExpandedDates({});
             setUserStatus({ isClockedIn: false });
             setActionJob(null);
+            setPrefillDate('');
+            setAddingLogDate(null);
+            setAddForm({ jobId: '', timeIn: '', timeOut: '' });
             setView('HOME');
           };
 
@@ -248,6 +331,7 @@
                   const result = await response.json();
                   
                   if (result.status === 'success') {
+                    Feedback.success();
                     setActiveUser(selectedUser);
                     setActiveUserPin(newPin);
                     setUserStatus(result.currentStatus || { isClockedIn: false });
@@ -255,11 +339,13 @@
                     setEnteredPin('');
                     setView('DASHBOARD');
                   } else {
+                    Feedback.error();
                     setPinError(true);
                     setTimeout(() => setEnteredPin(''), 500);
                   }
                 } catch (error) {
                   console.error("Login Failed:", error);
+                  Feedback.error();
                   setPinError(true);
                   setTimeout(() => setEnteredPin(''), 500);
                 } finally {
@@ -303,10 +389,12 @@
 
               fetchPublicData(globalPin, true);
 
+              Feedback.success();
               setSuccessMessage(`${action === 'OUT' ? 'Clocked out' : 'Clocked in to ' + job.name}`);
               setView('SUCCESS');
               setTimeout(() => resetKiosk(), 3000); 
             } catch (error) {
+              Feedback.error();
               setSuccessMessage("Network error. Please try again.");
               setView('SUCCESS');
               setTimeout(() => resetKiosk(), 2500);
@@ -315,7 +403,36 @@
             }
           };
 
-          // --- MANUAL & EDIT LOG ACTIONS ---
+          const getSafeDate = (dStr) => {
+            if (!dStr) return new Date(NaN);
+            let d = new Date(dStr);
+            if (typeof dStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dStr)) {
+               const parts = dStr.split('-');
+               d = new Date(parts[0], parts[1] - 1, parts[2]);
+            }
+            return d;
+          };
+          
+          const checkOverlap = (dateString, newTimeIn, newTimeOutInput, logIdToIgnore = null) => {
+            const targetDate = getSafeDate(dateString).toDateString();
+            const newTimeOut = newTimeOutInput || "23:59";
+            
+            for (const log of userLogs) {
+              if (logIdToIgnore && log.id === logIdToIgnore) continue; 
+              if (!log.timeIn24) continue; 
+              
+              if (getSafeDate(log.date).toDateString() === targetDate) {
+                const logTimeIn = log.timeIn24;
+                const logTimeOut = log.timeOut24 || "23:59";
+                
+                if (newTimeIn < logTimeOut && newTimeOut > logTimeIn) {
+                  return true;
+                }
+              }
+            }
+            return false;
+          };
+
           const saveManualLog = async (e) => {
             e.preventDefault();
             setIsSubmitting(true);
@@ -326,7 +443,15 @@
             const timeOut = formData.get('timeOut');
 
             if (timeOut && timeIn >= timeOut) {
-              alert("Clock Out time must be later than Clock In time. Multi-day logs are not permitted.");
+              Feedback.error();
+              setActionError("Punch Denied: Clock Out time must be later than Clock In time. Multi-day logs are not permitted.");
+              setIsSubmitting(false);
+              return;
+            }
+            
+            if (checkOverlap(date, timeIn, timeOut)) {
+              Feedback.error();
+              setActionError("Punch Denied: This shift overlaps with an existing time log on that date. Please adjust your times to prevent a collision.");
               setIsSubmitting(false);
               return;
             }
@@ -346,13 +471,82 @@
               const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
               const result = await res.json();
               if (result.status === 'error') {
-                  alert(result.message);
+                  Feedback.error();
+                  setActionError(result.message);
               } else {
+                  Feedback.success();
+                  setPrefillDate('');
                   await refreshUserData(activeUser.name, activeUserPin);
                   setView('MY_LOGS');
               }
             } catch (error) {
+              Feedback.error();
               console.error("Failed to save log.", error);
+            } finally {
+              setIsSubmitting(false);
+            }
+          };
+
+          const saveInlineAdd = async (rawDateString) => {
+            setIsSubmitting(true);
+            const jobSelected = jobs.find(j => j.id === addForm.jobId);
+
+            if (!jobSelected) {
+              Feedback.error();
+              setActionError("Please select a job.");
+              setIsSubmitting(false);
+              return;
+            }
+            if (!addForm.timeIn) {
+              Feedback.error();
+              setActionError("Please enter a Time In.");
+              setIsSubmitting(false);
+              return;
+            }
+
+            if (addForm.timeOut && addForm.timeIn >= addForm.timeOut) {
+              Feedback.error();
+              setActionError("Punch Denied: Clock Out time must be later than Clock In time.");
+              setIsSubmitting(false);
+              return;
+            }
+
+            const d = getSafeDate(rawDateString);
+            const formattedDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            
+            if (checkOverlap(formattedDate, addForm.timeIn, addForm.timeOut)) {
+              Feedback.error();
+              setActionError("Punch Denied: This shift overlaps with an existing time log on that date. Please adjust your times to prevent a collision.");
+              setIsSubmitting(false);
+              return;
+            }
+
+            const payload = {
+              action: 'ADD_MANUAL',
+              userName: activeUser.name,
+              logId: 'log-' + Math.random().toString(36).substr(2, 9),
+              date: formattedDate,
+              jobId: jobSelected.id,
+              jobName: jobSelected.name,
+              timeIn: addForm.timeIn,
+              timeOut: addForm.timeOut
+            };
+
+            try {
+              const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+              const result = await res.json();
+              if (result.status === 'error') {
+                  Feedback.error();
+                  setActionError(result.message);
+              } else {
+                  Feedback.success();
+                  setAddingLogDate(null);
+                  setAddForm({ jobId: '', timeIn: '', timeOut: '' });
+                  await refreshUserData(activeUser.name, activeUserPin);
+              }
+            } catch (error) {
+              Feedback.error();
+              console.error("Failed to save inline log.", error);
             } finally {
               setIsSubmitting(false);
             }
@@ -363,7 +557,16 @@
             const jobSelected = jobs.find(j => j.id === editForm.jobId);
             
             if (editForm.timeOut && editForm.timeIn >= editForm.timeOut) {
-              alert("Clock Out time must be later than Clock In time. Multi-day logs are not permitted.");
+              Feedback.error();
+              setActionError("Punch Denied: Clock Out time must be later than Clock In time. Multi-day logs are not permitted.");
+              setIsSubmitting(false);
+              return;
+            }
+            
+            const targetLog = userLogs.find(l => l.id === logId);
+            if (targetLog && checkOverlap(targetLog.date, editForm.timeIn, editForm.timeOut, logId)) {
+              Feedback.error();
+              setActionError("Punch Denied: This adjusted shift overlaps with another existing time log on that date. Please adjust your times to prevent a collision.");
               setIsSubmitting(false);
               return;
             }
@@ -381,12 +584,15 @@
               const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
               const result = await res.json();
               if (result.status === 'error') {
-                  alert(result.message);
+                  Feedback.error();
+                  setActionError(result.message);
               } else {
+                  Feedback.success();
                   setEditingLogId(null);
                   await refreshUserData(activeUser.name, activeUserPin);
               }
             } catch (error) {
+              Feedback.error();
               console.error("Failed to edit log.", error);
             } finally {
               setIsSubmitting(false);
@@ -399,22 +605,23 @@
               const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify({ action: 'DELETE_LOG', logId: logId }) });
               const result = await res.json();
               if (result.status === 'error') {
-                  alert(result.message);
+                  Feedback.error();
+                  setActionError(result.message);
               } else {
+                  Feedback.success();
                   setConfirmDeleteId(null);
                   await refreshUserData(activeUser.name, activeUserPin);
               }
             } catch (error) {
+              Feedback.error();
               console.error("Failed to delete log.", error);
             } finally {
               setIsSubmitting(false);
             }
           };
 
-          // --- HELPER RENDERS ---
           const formatHeaderDate = (dateString) => {
-            if (!dateString) return '';
-            const d = new Date(dateString);
+            const d = getSafeDate(dateString);
             if (!isNaN(d.getTime())) {
               return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
             }
@@ -430,39 +637,26 @@
             return `${diffHrs}h ${diffMins}m`;
           };
 
-          // --- GOOGLE DRIVE IMAGE HELPER ---
           const getDirectImageUrl = (url) => {
             if (!url) return '';
-            
             const driveRegex1 = /\/file\/d\/([a-zA-Z0-9_-]+)/;
             const driveRegex2 = /id=([a-zA-Z0-9_-]+)/;
-            
             const match = url.match(driveRegex1) || url.match(driveRegex2);
-            
             if (match && match[1] && url.includes('drive.google.com')) {
               return `https://drive.google.com/thumbnail?id=${match[1]}&sz=w1000`;
             }
-            
             return url;
           };
 
-          // --- VIEWS ---
           const renderHome = () => (
             <div className="flex flex-col min-h-full items-center justify-start sm:justify-center p-4 sm:p-8 py-8 sm:py-12 space-y-8 sm:space-y-12">
               <div className="text-center space-y-2">
-                <div className="flex items-center justify-center gap-2 sm:gap-4 mb-2 sm:mb-4 text-[#991b1f]">
-                  <ArrowRight className="w-8 h-8 sm:w-10 sm:h-10" />
-                  <span className="text-xl sm:text-2xl font-bold font-sans text-stone-600">+</span>
-                  <Clock className="w-8 h-8 sm:w-10 sm:h-10" />
-                  <span className="text-xl sm:text-2xl font-bold font-sans text-stone-600">+</span>
-                  <svg className="w-8 h-8 sm:w-10 sm:h-10" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="10" cy="22" r="5" />
-                    <circle cx="10" cy="22" r="2" />
-                    <circle cx="22" cy="22" r="5" />
-                    <circle cx="22" cy="22" r="2" />
-                    <circle cx="16" cy="12" r="5" />
-                    <circle cx="16" cy="12" r="2" />
-                  </svg>
+                <div className="flex items-center justify-center mb-6 sm:mb-8">
+                  <img 
+                    src="https://static.wixstatic.com/media/f29f2b_502acc2b3b2e42efb9a7e9232fe2b77c~mv2.png" 
+                    alt="Arrow Logo" 
+                    className="h-16 sm:h-20 md:h-24 object-contain drop-shadow-xl"
+                  />
                 </div>
                 <h1 className="text-4xl sm:text-5xl font-bold font-crimson text-stone-100 tracking-tight flex items-center justify-center gap-3 leading-tight">
                   Arrow Time Logs
@@ -484,7 +678,7 @@
                   return (
                     <button
                       key={user.name}
-                      onClick={() => { setSelectedUser(user); setView('PIN'); }}
+                      onClick={() => { Feedback.tap(); setSelectedUser(user); setView('PIN'); }}
                       className="p-4 sm:p-6 bg-stone-900 rounded-[2rem] sm:rounded-3xl shadow-lg border border-stone-800 hover:border-[#991b1f] hover:bg-stone-800 transition-all group text-left active:scale-95 flex flex-col gap-4"
                     >
                       <div className="flex items-center gap-3 sm:gap-4 w-full">
@@ -493,7 +687,9 @@
                         </div>
                         <div className="flex-1 min-w-0">
                           <h3 className="text-xl sm:text-2xl font-bold font-crimson text-stone-100 group-hover:text-white transition-colors truncate">{user.name}</h3>
-                          <p className="text-sm sm:text-base text-stone-400 truncate">{user.role}</p>
+                          {user.role && (
+                            <p className="text-sm sm:text-base text-stone-400 truncate">{user.role}</p>
+                          )}
                         </div>
                       </div>
                       {isWorking && (
@@ -531,15 +727,15 @@
 
                 <div className="grid grid-cols-3 gap-3 sm:gap-4 w-full">
                   {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                    <button key={num} disabled={isLoadingData} onClick={() => handleGlobalPinDigit(num.toString())} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+                    <button key={num} disabled={isLoadingData} onClick={() => { Feedback.tap(); handleGlobalPinDigit(num.toString()); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
                       {num}
                     </button>
                   ))}
                   <div className="h-14 sm:h-16"></div>
-                  <button disabled={isLoadingData} onClick={() => handleGlobalPinDigit('0')} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+                  <button disabled={isLoadingData} onClick={() => { Feedback.tap(); handleGlobalPinDigit('0'); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
                     0
                   </button>
-                  <button disabled={isLoadingData} onClick={() => { setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+                  <button disabled={isLoadingData} onClick={() => { Feedback.tap(); setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
                     <Delete className="w-5 h-5 sm:w-6 sm:h-6" />
                   </button>
                 </div>
@@ -550,7 +746,7 @@
           const renderPinScreen = () => (
             <div className="flex flex-col min-h-full items-center justify-center p-4 sm:p-8 relative">
               <div className="absolute top-4 sm:top-8 left-4 sm:left-8">
-                <button onClick={() => setView('HOME')} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-stone-100 text-base sm:text-lg font-medium p-2 transition-colors">
+                <button onClick={() => { Feedback.tap(); setView('HOME'); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-stone-100 text-base sm:text-lg font-medium p-2 transition-colors">
                   <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Back
                 </button>
               </div>
@@ -572,15 +768,15 @@
 
                 <div className="grid grid-cols-3 gap-3 sm:gap-4 w-full">
                   {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                    <button key={num} disabled={isVerifyingPin} onClick={() => handlePinDigit(num.toString())} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+                    <button key={num} disabled={isVerifyingPin} onClick={() => { Feedback.tap(); handlePinDigit(num.toString()); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
                       {num}
                     </button>
                   ))}
                   <div className="h-14 sm:h-16"></div>
-                  <button disabled={isVerifyingPin} onClick={() => handlePinDigit('0')} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+                  <button disabled={isVerifyingPin} onClick={() => { Feedback.tap(); handlePinDigit('0'); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
                     0
                   </button>
-                  <button disabled={isVerifyingPin} onClick={() => { setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+                  <button disabled={isVerifyingPin} onClick={() => { Feedback.tap(); setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
                     <Delete className="w-5 h-5 sm:w-6 sm:h-6" />
                   </button>
                 </div>
@@ -596,7 +792,7 @@
                     <span className="text-xl sm:text-2xl mt-1">⚠️</span>
                     <div>
                       <p className="font-bold text-amber-200 text-base sm:text-lg">Missed Clock Out Detected</p>
-                      <p className="text-xs sm:text-sm mt-1">A recent shift was left open and auto-closed at 9:00 PM. Please review your <button onClick={() => setView('MY_LOGS')} className="underline font-bold text-white hover:text-amber-100 transition-colors">Time Logs</button> to correct the time.</p>
+                      <p className="text-xs sm:text-sm mt-1">A recent shift was left open and auto-closed at 9:00 PM. Please review your <button onClick={() => { Feedback.tap(); setView('MY_LOGS'); }} className="underline font-bold text-white hover:text-amber-100 transition-colors">Time Logs</button> to correct the time.</p>
                     </div>
                   </div>
                 )}
@@ -624,7 +820,7 @@
 
                 <div className="w-full max-w-lg">
                   {!userStatus.isClockedIn ? (
-                    <button disabled={isSubmitting} onClick={() => initiatePunch('IN')} className="w-full flex items-center justify-center gap-3 sm:gap-4 p-6 sm:p-8 bg-emerald-600 hover:bg-emerald-500 text-white rounded-3xl shadow-lg active:scale-95 transition-all disabled:opacity-50 disabled:active:scale-100">
+                    <button disabled={isSubmitting} onClick={() => { Feedback.tap(); initiatePunch('IN'); }} className="w-full flex items-center justify-center gap-3 sm:gap-4 p-6 sm:p-8 bg-emerald-600 hover:bg-emerald-500 text-white rounded-3xl shadow-lg active:scale-95 transition-all disabled:opacity-50 disabled:active:scale-100">
                       {isSubmitting ? (
                         <Loader className="w-8 h-8 sm:w-10 sm:h-10 animate-spin" />
                       ) : (
@@ -636,11 +832,11 @@
                     </button>
                   ) : (
                     <div className="grid grid-cols-2 gap-3 sm:gap-4">
-                      <button disabled={isSubmitting} onClick={() => initiatePunch('SWITCH')} className="flex flex-col items-center justify-center gap-2 sm:gap-4 p-4 sm:p-6 bg-[#991b1f] hover:bg-[#b02227] text-white rounded-2xl sm:rounded-3xl shadow-lg active:scale-95 transition-all disabled:opacity-50 disabled:active:scale-100">
+                      <button disabled={isSubmitting} onClick={() => { Feedback.tap(); initiatePunch('SWITCH'); }} className="flex flex-col items-center justify-center gap-2 sm:gap-4 p-4 sm:p-6 bg-[#991b1f] hover:bg-[#b02227] text-white rounded-2xl sm:rounded-3xl shadow-lg active:scale-95 transition-all disabled:opacity-50 disabled:active:scale-100">
                         <ArrowRightLeft className="w-6 h-6 sm:w-10 sm:h-10" />
                         <span className="text-base sm:text-xl font-bold font-sans tracking-wide text-center leading-tight">Switch Job</span>
                       </button>
-                      <button disabled={isSubmitting} onClick={() => initiatePunch('OUT')} className="flex flex-col items-center justify-center gap-2 sm:gap-4 p-4 sm:p-6 bg-rose-700 hover:bg-rose-600 text-white rounded-2xl sm:rounded-3xl shadow-lg active:scale-95 transition-all disabled:opacity-50 disabled:active:scale-100">
+                      <button disabled={isSubmitting} onClick={() => { Feedback.tap(); initiatePunch('OUT'); }} className="flex flex-col items-center justify-center gap-2 sm:gap-4 p-4 sm:p-6 bg-rose-700 hover:bg-rose-600 text-white rounded-2xl sm:rounded-3xl shadow-lg active:scale-95 transition-all disabled:opacity-50 disabled:active:scale-100">
                         {isSubmitting ? (
                            <Loader className="w-6 h-6 sm:w-10 sm:h-10 animate-spin" />
                         ) : (
@@ -655,11 +851,11 @@
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 sm:gap-4 w-full max-w-lg mt-2 sm:mt-4">
-                  <button onClick={() => setView('MY_LOGS')} className="flex items-center justify-center gap-2 sm:gap-3 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-[#991b1f] hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-300 hover:text-white shadow-md">
+                  <button onClick={() => { Feedback.tap(); setView('MY_LOGS'); }} className="flex items-center justify-center gap-2 sm:gap-3 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-[#991b1f] hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-300 hover:text-white shadow-md">
                     <CalendarDays className="w-5 h-5 sm:w-6 sm:h-6 text-[#991b1f] group-hover:text-white transition-colors" />
                     <span className="font-bold text-sm sm:text-lg font-sans">Time Logs</span>
                   </button>
-                  <button onClick={resetKiosk} className="flex items-center justify-center gap-2 sm:gap-3 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-stone-600 hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-400 hover:text-white shadow-md">
+                  <button onClick={() => { Feedback.tap(); resetKiosk(); }} className="flex items-center justify-center gap-2 sm:gap-3 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-stone-600 hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-400 hover:text-white shadow-md">
                     <LogOut className="w-5 h-5 sm:w-6 sm:h-6 group-hover:text-stone-300 transition-colors" />
                     <span className="font-bold text-sm sm:text-lg font-sans">Log Out</span>
                   </button>
@@ -694,10 +890,10 @@
             return (
               <div className="flex flex-col min-h-full max-w-5xl mx-auto p-4 sm:p-8">
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6 sm:mb-8 border-b border-stone-800 pb-4 sm:pb-6 w-full">
-                  <button onClick={() => setView('DASHBOARD')} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors">
+                  <button onClick={() => { Feedback.tap(); setView('DASHBOARD'); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors">
                     <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Dashboard
                   </button>
-                  <button onClick={() => setView('MANUAL_LOG')} className="flex items-center justify-center w-full sm:w-auto gap-2 bg-[#991b1f] text-white px-4 sm:px-5 py-2.5 rounded-xl hover:bg-[#b02227] active:scale-95 font-medium transition-transform shadow-lg text-sm sm:text-base">
+                  <button onClick={() => { Feedback.tap(); setView('MANUAL_LOG'); }} className="flex items-center justify-center w-full sm:w-auto gap-2 bg-[#991b1f] text-white px-4 sm:px-5 py-2.5 rounded-xl hover:bg-[#b02227] active:scale-95 font-medium transition-transform shadow-lg text-sm sm:text-base">
                     <Plus className="w-4 h-4 sm:w-5 sm:h-5" /> Add Missing Log
                   </button>
                 </div>
@@ -721,7 +917,7 @@
                             <React.Fragment key={dateLabel}>
                               
                               <div 
-                                onClick={() => toggleDate(dateLabel)}
+                                onClick={() => { Feedback.tap(); toggleDate(dateLabel); }}
                                 className="flex items-center justify-between px-4 sm:px-5 py-3 sm:py-4 bg-stone-950 border-t border-stone-800 cursor-pointer hover:bg-stone-900 transition-colors select-none group sticky top-0 z-20 first:border-t-0"
                               >
                                 <div className="flex items-center gap-2 sm:gap-3 text-stone-300 group-hover:text-stone-100 transition-colors font-bold uppercase tracking-widest text-xs sm:text-sm">
@@ -729,6 +925,21 @@
                                   {dateLabel}
                                 </div>
                                 <div className="flex items-center gap-3 sm:gap-4 text-stone-400 text-[10px] sm:text-xs font-bold uppercase tracking-wider">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation(); 
+                                      Feedback.tap();
+                                      setAddingLogDate(dateLabel);
+                                      setExpandedDates(prev => ({ ...prev, [dateLabel]: true }));
+                                      setAddForm({ jobId: '', timeIn: '', timeOut: '' });
+                                    }}
+                                    className="flex items-center gap-1 p-1 sm:p-1.5 text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/20 rounded-lg transition-all active:scale-90 border border-transparent hover:border-emerald-500/30"
+                                    title="Add Log for this Day"
+                                  >
+                                    <Plus className="w-4 h-4 sm:w-5 sm:h-5" />
+                                    <span className="hidden sm:inline">Add Entry</span>
+                                  </button>
+
                                   <span className="hidden sm:inline">{group.count} {group.count === 1 ? 'Entry' : 'Entries'}</span>
                                   <span className="text-emerald-400 bg-emerald-500/10 px-2 sm:px-3 py-1 rounded-md border border-emerald-500/20">
                                     {group.totalHours > 0 ? group.totalHours.toFixed(2) + 'h' : '--'} Total
@@ -746,7 +957,41 @@
                                 </div>
                               )}
 
-                              {isExpanded && group.logs.map((log, index) => {
+                              {isExpanded && addingLogDate === dateLabel && (
+                                <div className="flex flex-col sm:grid sm:grid-cols-12 sm:items-center gap-3 sm:gap-4 p-4 sm:p-5 bg-emerald-900/10 border-b border-emerald-900/20">
+                                  <div className="sm:col-span-5">
+                                    <select 
+                                      value={addForm.jobId} 
+                                      onChange={e => setAddForm({...addForm, jobId: e.target.value})}
+                                      className="w-full min-w-[140px] p-2 sm:p-3 border border-emerald-700/50 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 bg-stone-800 text-stone-100 text-xs sm:text-sm"
+                                    >
+                                      <option value="">Select a job...</option>
+                                      {jobs.map(j => <option key={j.id} value={j.id}>{j.id} - {j.name}</option>)}
+                                    </select>
+                                  </div>
+
+                                  <div className="flex items-center justify-between sm:contents gap-3">
+                                    <div className="w-full sm:col-span-2">
+                                      <label className="sm:hidden block text-[10px] text-emerald-400/80 uppercase font-bold mb-1">Time In</label>
+                                      <input type="time" value={addForm.timeIn} onChange={e => setAddForm({...addForm, timeIn: e.target.value})} className="w-full min-w-[110px] p-2 sm:p-3 border border-emerald-700/50 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 bg-stone-800 text-stone-100 text-xs sm:text-sm [color-scheme:dark]" />
+                                    </div>
+                                    <div className="w-full sm:col-span-2">
+                                      <label className="sm:hidden block text-[10px] text-emerald-400/80 uppercase font-bold mb-1">Time Out</label>
+                                      <input type="time" value={addForm.timeOut} onChange={e => setAddForm({...addForm, timeOut: e.target.value})} className="w-full min-w-[110px] p-2 sm:p-3 border border-emerald-700/50 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 bg-stone-800 text-stone-100 text-xs sm:text-sm [color-scheme:dark]" />
+                                    </div>
+                                  </div>
+
+                                  <div className="hidden sm:block sm:col-span-1 text-emerald-500/70 text-xs sm:text-sm italic">New</div>
+                                  <div className="sm:col-span-2 flex items-center justify-end gap-1 sm:gap-2 mt-2 sm:mt-0 pt-3 sm:pt-0 border-t border-emerald-900/30 sm:border-0">
+                                    <button onClick={() => saveInlineAdd(group.logs[0]?.date)} disabled={isSubmitting} className="flex-1 sm:flex-none flex justify-center p-1.5 sm:p-2 bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/40 active:scale-90 rounded-lg transition-all border border-emerald-500/30">
+                                      {isSubmitting ? <Loader className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> : <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" />}
+                                    </button>
+                                    <button onClick={() => { Feedback.tap(); setAddingLogDate(null); setAddForm({jobId: '', timeIn: '', timeOut: ''}); }} disabled={isSubmitting} className="flex-1 sm:flex-none flex justify-center p-1.5 sm:p-2 bg-stone-800 text-stone-400 hover:bg-stone-700 hover:text-white active:scale-90 rounded-lg transition-all border border-stone-700"><X className="w-4 h-4 sm:w-5 sm:h-5" /></button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {isExpanded && [...group.logs].sort((a, b) => (b.timeIn24 || "").localeCompare(a.timeIn24 || "")).map((log, index) => {
                                 const isEditing = editingLogId === log.id;
                                 const isConfirmingDelete = confirmDeleteId === log.id;
                                 const rowKey = log.id || `legacy-log-${dateLabel}-${index}`;
@@ -777,35 +1022,38 @@
 
                                       <div className="hidden sm:block sm:col-span-1 text-stone-500 text-xs sm:text-sm italic">Auto</div>
                                       <div className="sm:col-span-2 flex items-center justify-end gap-1 sm:gap-2 mt-2 sm:mt-0 pt-3 sm:pt-0 border-t border-[#991b1f]/20 sm:border-0">
-                                        <button onClick={() => saveInlineEdit(log.id)} disabled={isSubmitting} className="flex-1 sm:flex-none flex justify-center p-1.5 sm:p-2 bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/40 rounded-lg transition-colors border border-emerald-500/30"><CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" /></button>
-                                        <button onClick={() => setEditingLogId(null)} disabled={isSubmitting} className="flex-1 sm:flex-none flex justify-center p-1.5 sm:p-2 bg-stone-800 text-stone-400 hover:bg-stone-700 hover:text-white rounded-lg transition-colors border border-stone-700"><X className="w-4 h-4 sm:w-5 sm:h-5" /></button>
+                                        <button onClick={() => saveInlineEdit(log.id)} disabled={isSubmitting} className="flex-1 sm:flex-none flex justify-center p-1.5 sm:p-2 bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/40 rounded-lg transition-colors border border-emerald-500/30">
+                                          {isSubmitting ? <Loader className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> : <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" />}
+                                        </button>
+                                        <button onClick={() => { Feedback.tap(); setEditingLogId(null); }} disabled={isSubmitting} className="flex-1 sm:flex-none flex justify-center p-1.5 sm:p-2 bg-stone-800 text-stone-400 hover:bg-stone-700 hover:text-white rounded-lg transition-colors border border-stone-700"><X className="w-4 h-4 sm:w-5 sm:h-5" /></button>
                                       </div>
                                     </div>
                                   );
                                 }
 
                                 return (
-                                  <div key={rowKey} className="flex flex-col sm:grid sm:grid-cols-12 sm:items-center gap-2 sm:gap-4 p-4 sm:p-5 hover:bg-stone-800/30 transition-colors border-b border-stone-800/50 last:border-b-0 group">
-                                    <div className="sm:col-span-5 flex flex-col sm:flex-row sm:items-center gap-0.5 sm:gap-2 min-w-0 mb-1.5 sm:mb-0">
-                                      <span className="font-bold text-stone-200 text-sm sm:text-base">{log.jobId}</span>
-                                      <span className="text-stone-400 text-xs sm:text-sm truncate max-w-[150px] sm:max-w-xs">{log.jobName}</span>
+                                  <div key={rowKey} className="flex flex-col sm:grid sm:grid-cols-12 sm:items-center gap-3 sm:gap-4 p-4 sm:p-5 hover:bg-stone-800/30 transition-colors border-b border-stone-800/50 last:border-b-0 group">
+                                    
+                                    <div className="flex items-start sm:items-center justify-between sm:contents gap-4 w-full">
+                                      <div className="sm:col-span-5 flex flex-col sm:flex-row sm:items-center gap-0.5 sm:gap-2 min-w-0 flex-1">
+                                        <span className="font-bold text-stone-200 text-sm sm:text-base truncate">{log.jobId}</span>
+                                        <span className="text-stone-400 text-xs sm:text-sm truncate">{log.jobName}</span>
+                                      </div>
+
+                                      <div className="flex items-center gap-1.5 sm:gap-0 sm:contents bg-stone-950 sm:bg-transparent rounded-lg sm:rounded-none px-2.5 py-1.5 sm:p-0 border border-stone-800 sm:border-none shrink-0 whitespace-nowrap">
+                                        <div className="sm:col-span-2 text-stone-300 text-xs sm:text-base">
+                                          {log.timeIn}
+                                        </div>
+                                        <ArrowRight className="w-3 h-3 text-stone-600 sm:hidden" />
+                                        <div className="sm:col-span-2 text-stone-400 font-medium text-xs sm:text-base">
+                                          {log.timeOut || '--:--'}
+                                        </div>
+                                      </div>
                                     </div>
 
-                                    <div className="flex items-center justify-between sm:contents bg-stone-950 sm:bg-transparent rounded-xl sm:rounded-none p-3 sm:p-0 border border-stone-800 sm:border-none">
-                                      <div className="sm:col-span-2 flex flex-col sm:block text-stone-300 text-sm sm:text-base">
-                                        <span className="sm:hidden text-[10px] text-stone-500 uppercase font-bold mb-0.5">Time In</span>
-                                        <span>{log.timeIn}</span>
-                                      </div>
-                                      <ArrowRight className="w-4 h-4 text-stone-700 sm:hidden" />
-                                      <div className="sm:col-span-2 flex flex-col sm:block text-right sm:text-left text-stone-400 font-medium text-sm sm:text-base">
-                                        <span className="sm:hidden text-[10px] text-stone-500 uppercase font-bold mb-0.5">Time Out</span>
-                                        <span>{log.timeOut || '--:--'}</span>
-                                      </div>
-                                    </div>
-
-                                    <div className="flex items-center justify-between sm:contents mt-2 sm:mt-0">
-                                      <div className="sm:col-span-1 flex items-center gap-2 sm:block text-stone-200 font-bold text-base">
-                                        <span className="sm:hidden text-[10px] text-stone-500 uppercase font-bold">Total:</span>
+                                    <div className="flex items-center justify-between sm:contents mt-1 sm:mt-0 pt-2 sm:pt-0 border-t border-stone-800/40 sm:border-none w-full">
+                                      <div className="sm:col-span-1 flex items-center gap-1.5 sm:block text-stone-200 font-bold text-sm sm:text-base">
+                                        <span className="sm:hidden text-[10px] text-stone-500 uppercase font-bold tracking-wider">Total:</span>
                                         <span className="text-emerald-400 sm:text-stone-200">{log.duration ? `${log.duration}h` : '--'}</span>
                                       </div>
                                       
@@ -821,20 +1069,20 @@
                                             <button onClick={() => deleteLog(log.id)} disabled={isSubmitting} className="flex-1 sm:flex-none flex justify-center px-2 sm:px-3 py-1 sm:py-1.5 bg-rose-600 text-white rounded sm:rounded-lg hover:bg-rose-500 active:scale-95 transition-all text-xs sm:text-sm font-bold shadow-sm">
                                               {isSubmitting ? <Loader className="w-4 h-4 animate-spin" /> : 'Yes'}
                                             </button>
-                                            <button onClick={() => setConfirmDeleteId(null)} disabled={isSubmitting} className="flex-1 sm:flex-none px-2 sm:px-3 py-1 sm:py-1.5 bg-stone-800 text-stone-300 rounded sm:rounded-lg hover:bg-stone-700 hover:text-white active:scale-95 transition-all text-xs sm:text-sm font-bold shadow-sm border border-stone-700">No</button>
+                                            <button onClick={() => { Feedback.tap(); setConfirmDeleteId(null); }} disabled={isSubmitting} className="flex-1 sm:flex-none px-2 sm:px-3 py-1 sm:py-1.5 bg-stone-800 text-stone-300 rounded sm:rounded-lg hover:bg-stone-700 hover:text-white active:scale-95 transition-all text-xs sm:text-sm font-bold shadow-sm border border-stone-700">No</button>
                                           </div>
                                         ) : (
                                           <div className="flex items-center justify-end gap-1">
                                             <button 
-                                              onClick={() => { setEditingLogId(log.id); setEditForm({ jobId: log.jobId, timeIn: log.timeIn24, timeOut: log.timeOut24 || '' }); setConfirmDeleteId(null); }}
-                                              className="p-1.5 sm:p-2 text-stone-500 hover:text-[#e12d33] hover:bg-[#991b1f]/20 active:scale-90 rounded-lg transition-all border border-transparent hover:border-[#991b1f]/30"
+                                              onClick={() => { Feedback.tap(); setEditingLogId(log.id); setEditForm({ jobId: log.jobId, timeIn: log.timeIn24, timeOut: log.timeOut24 || '' }); setConfirmDeleteId(null); }}
+                                              className="p-1.5 sm:p-2 text-stone-500 hover:text-amber-400 hover:bg-amber-400/20 active:scale-90 rounded-lg transition-all border border-transparent hover:border-amber-400/30"
                                               title="Edit Log"
                                             >
                                               <Edit className="w-4 h-4 sm:w-5 sm:h-5" />
                                             </button>
                                             <button 
-                                              onClick={() => setConfirmDeleteId(log.id)}
-                                              className="p-1.5 sm:p-2 text-stone-500 hover:text-rose-400 hover:bg-rose-900/30 active:scale-90 rounded-lg transition-all border border-transparent hover:border-rose-900/50"
+                                              onClick={() => { Feedback.tap(); setConfirmDeleteId(log.id); }}
+                                              className="p-1.5 sm:p-2 text-stone-500 hover:text-rose-400 hover:bg-rose-500/20 active:scale-90 rounded-lg transition-all border border-transparent hover:border-rose-500/30"
                                               title="Delete Log"
                                             >
                                               <Trash className="w-4 h-4 sm:w-5 sm:h-5" />
@@ -860,7 +1108,7 @@
           const renderManualLog = () => (
             <div className="flex flex-col min-h-full max-w-2xl mx-auto p-4 sm:p-8">
               <div className="flex justify-start mb-4 sm:mb-8 w-full">
-                <button onClick={() => setView('MY_LOGS')} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors">
+                <button onClick={() => { Feedback.tap(); setView('MY_LOGS'); setPrefillDate(''); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors">
                   <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Cancel
                 </button>
               </div>
@@ -873,7 +1121,7 @@
               <form onSubmit={saveManualLog} className="bg-stone-900 p-6 sm:p-8 rounded-3xl border border-stone-800 shadow-xl space-y-4 sm:space-y-6">
                 <div>
                   <label className="block text-xs sm:text-sm font-bold text-stone-400 mb-1.5 sm:mb-2">Date</label>
-                  <input required type="date" name="date" className="w-full p-3 sm:p-4 bg-stone-800 border border-stone-700 rounded-xl focus:ring-2 focus:ring-[#991b1f] focus:border-[#991b1f] text-stone-100 text-sm sm:text-base [color-scheme:dark] transition-all" />
+                  <input required type="date" name="date" defaultValue={prefillDate} className="w-full p-3 sm:p-4 bg-stone-800 border border-stone-700 rounded-xl focus:ring-2 focus:ring-[#991b1f] focus:border-[#991b1f] text-stone-100 text-sm sm:text-base [color-scheme:dark] transition-all" />
                 </div>
                 <div>
                   <label className="block text-xs sm:text-sm font-bold text-stone-400 mb-1.5 sm:mb-2">Job / Task</label>
@@ -907,7 +1155,7 @@
             return (
               <div className="flex flex-col min-h-full max-w-4xl mx-auto p-4 sm:p-8">
                 <div className="flex justify-start mb-4 sm:mb-8 w-full">
-                  <button onClick={() => { setView('DASHBOARD'); setSearchTerm(''); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors">
+                  <button onClick={() => { Feedback.tap(); setView('DASHBOARD'); setSearchTerm(''); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors">
                     <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Cancel
                   </button>
                 </div>
@@ -930,7 +1178,7 @@
                     <div className="col-span-1 md:col-span-2 p-8 sm:p-12 text-center text-stone-500 bg-stone-900 rounded-3xl border-2 border-dashed border-stone-800 text-base sm:text-lg">No jobs found</div>
                   ) : (
                     filteredJobs.map(job => (
-                      <button key={job.id} onClick={() => commitPunch(pendingAction, job)} disabled={isSubmitting} className={`flex items-center gap-4 sm:gap-5 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-[#991b1f] hover:bg-stone-800/50 rounded-2xl sm:rounded-3xl transition-all text-left shadow-lg group ${isSubmitting ? 'opacity-50' : 'active:scale-95'}`}>
+                      <button key={job.id} onClick={() => { Feedback.tap(); commitPunch(pendingAction, job); }} disabled={isSubmitting} className={`flex items-center gap-4 sm:gap-5 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-[#991b1f] hover:bg-stone-800/50 rounded-2xl sm:rounded-3xl transition-all text-left shadow-lg group ${isSubmitting ? 'opacity-50' : 'active:scale-95'}`}>
                         <div className="relative w-16 h-16 sm:w-20 sm:h-20 rounded-xl sm:rounded-2xl overflow-hidden bg-stone-800 shrink-0 border border-stone-700 flex items-center justify-center">
                           {job.imageUrl ? (
                             <>
@@ -1011,6 +1259,25 @@
                   </>
                 )}
               </div>
+
+              {/* ACTION DENIED MODAL */}
+              {actionError && (
+                <div className="absolute inset-0 z-[100] flex items-center justify-center bg-stone-950/80 backdrop-blur-sm p-4 transition-all">
+                  <div className="bg-stone-900 border border-rose-900/50 p-6 sm:p-8 rounded-3xl shadow-[0_0_50px_rgba(153,27,31,0.2)] max-w-sm w-full flex flex-col items-center text-center animate-in fade-in zoom-in-95 duration-200">
+                    <div className="w-16 h-16 bg-rose-500/10 text-rose-500 border border-rose-500/20 rounded-full flex items-center justify-center mb-4 shadow-inner">
+                      <X className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-2xl font-bold font-crimson text-stone-100 mb-2">Action Denied</h3>
+                    <p className="text-stone-400 mb-6 sm:mb-8 leading-relaxed text-sm sm:text-base">{actionError}</p>
+                    <button 
+                      onClick={() => { Feedback.tap(); setActionError(null); }}
+                      className="w-full py-3.5 sm:py-4 bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold rounded-xl active:scale-95 transition-all shadow-lg border border-stone-700"
+                    >
+                      Understood
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         }
