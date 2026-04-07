@@ -196,7 +196,9 @@
                     });
                     setJobs(sortedJobs);
                   }
-                  if (data.users) setUsers(data.users);
+                  if (data.users) {
+                    setUsers(data.users.sort((a, b) => a.name.localeCompare(b.name)));
+                  }
                   if (data.userStatuses) setUserStatuses(data.userStatuses);
                   setIsGlobalUnlocked(true);
                   localStorage.setItem('arrowGlobalPin', activePin);
@@ -655,7 +657,7 @@
                   <img 
                     src="https://static.wixstatic.com/media/f29f2b_502acc2b3b2e42efb9a7e9232fe2b77c~mv2.png" 
                     alt="Arrow Logo" 
-                    className="h-16 sm:h-20 md:h-24 object-contain drop-shadow-xl"
+                    className="h-8 sm:h-10 md:h-12 object-contain drop-shadow-xl"
                   />
                 </div>
                 <h1 className="text-4xl sm:text-5xl font-bold font-crimson text-stone-100 tracking-tight flex items-center justify-center gap-3 leading-tight">
