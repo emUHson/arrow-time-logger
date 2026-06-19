@@ -61,7 +61,7 @@ const Edit = LucideIcons.Pencil || LucideIcons.Edit2 || LucideIcons.Edit;
 const Trash = LucideIcons.Trash2 || LucideIcons.Trash;
 const Loader = LucideIcons.Loader2 || LucideIcons.Loader;
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbyqYRawldjJkfUVAVcn7kkBmhDnWckbthBRlC7rmfG9SgBgBCNCeTYJ_6Koa93PhF0/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbx3CVTz2xrK6H--VXgFzjkgK-vXZEzc96HORRYXmou_qkOSXUTNjR4561EqG4NxqFLy/exec';
 
 // --- HARDWARE FEEDBACK ENGINE (Audio + Haptics) ---
 const Feedback = {
@@ -142,8 +142,21 @@ const [addingLogDate, setAddingLogDate] = useState(null);
 const [addForm, setAddForm] = useState({ jobId: '', timeIn: '', timeOut: '' });
 const [prefillDate, setPrefillDate] = useState(''); 
 
+const [logViewMode, setLogViewMode] = useState('CALENDAR');
+const [calendarSelection, setCalendarSelection] = useState(null);
+const [calendarDragState, setCalendarDragState] = useState(null);
+const calendarScrollRef = useRef(null);
+
+const [isUpdatingPin, setIsUpdatingPin] = useState(false);
+const [pinUpdateStep, setPinUpdateStep] = useState('NEW');
+const [tempNewPin, setTempNewPin] = useState('');
+
 const [currentTime, setCurrentTime] = useState(new Date());
 const timeoutRef = useRef(null);
+const lastActivityRef = useRef(Date.now());
+const viewRef = useRef(view);
+const [showInactivityWarning, setShowInactivityWarning] = useState(false);
+const [inactivitySecondsLeft, setInactivitySecondsLeft] = useState(60);
 
 useEffect(() => {
 const savedTime = localStorage.getItem('arrowGlobalTime');
@@ -239,40 +252,65 @@ console.error(e);
 };
 
 useEffect(() => {
-const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+viewRef.current = view;
+
+if (window.history.state?.view !== view) {
+window.history.pushState({ view }, '');
+}
+}, [view]);
+
+useEffect(() => {
+window.history.replaceState({ view: 'HOME' }, '');
+const handlePopState = (e) => {
+if (e.state && e.state.view) {
+setView(e.state.view);
+} else {
+setView('HOME');
+}
+};
+window.addEventListener('popstate', handlePopState);
+return () => window.removeEventListener('popstate', handlePopState);
+}, []);
+
+useEffect(() => {
+const timer = setInterval(() => {
+setCurrentTime(new Date());
+
+if (viewRef.current !== 'HOME') {
+const elapsed = Date.now() - lastActivityRef.current;
+if (elapsed >= 300000) { 
+resetKiosk();
+} else if (elapsed >= 240000) { 
+setShowInactivityWarning(true);
+setInactivitySecondsLeft(Math.ceil((300000 - elapsed) / 1000));
+} else {
+setShowInactivityWarning(false);
+}
+} else {
+setShowInactivityWarning(false);
+}
+}, 1000);
 return () => clearInterval(timer);
 }, []);
 
 useEffect(() => {
 const handleActivity = () => {
-if (timeoutRef.current) clearTimeout(timeoutRef.current);
-
-if (view !== 'HOME') {
-timeoutRef.current = setTimeout(() => {
-resetKiosk();
-}, 30000); 
+lastActivityRef.current = Date.now();
+if (showInactivityWarning) {
+setShowInactivityWarning(false);
 }
 };
 
-handleActivity();
-
-if (view !== 'HOME') {
-window.addEventListener('mousemove', handleActivity);
 window.addEventListener('keydown', handleActivity);
 window.addEventListener('touchstart', handleActivity);
 window.addEventListener('click', handleActivity);
-window.addEventListener('scroll', handleActivity, true);
-}
 
 return () => {
-window.removeEventListener('mousemove', handleActivity);
 window.removeEventListener('keydown', handleActivity);
 window.removeEventListener('touchstart', handleActivity);
 window.removeEventListener('click', handleActivity);
-window.removeEventListener('scroll', handleActivity, true);
-if (timeoutRef.current) clearTimeout(timeoutRef.current);
 };
-}, [view]);
+}, [showInactivityWarning]);
 
 useEffect(() => {
 if (view === 'MY_LOGS') {
@@ -280,6 +318,26 @@ const todayLabel = formatHeaderDate(new Date().toLocaleDateString('en-US'));
 setExpandedDates({ [todayLabel]: true });
 }
 }, [view]);
+
+useEffect(() => {
+if (logViewMode === 'CALENDAR' && view === 'MY_LOGS') {
+// Wait for React to finish rendering the DOM before scrolling to the end (Today)
+setTimeout(() => {
+if (calendarScrollRef.current) {
+// Scroll horizontally to the end (Today)
+calendarScrollRef.current.scrollLeft = calendarScrollRef.current.scrollWidth;
+
+// Center vertically on the current time
+const pixelsPerMinute = 1.5;
+const now = new Date();
+const currentMins = now.getHours() * 60 + now.getMinutes();
+const targetY = currentMins * pixelsPerMinute;
+const containerHeight = calendarScrollRef.current.clientHeight;
+calendarScrollRef.current.scrollTop = Math.max(0, targetY - (containerHeight / 2));
+}
+}, 50);
+}
+}, [logViewMode, view]);
 
 const resetKiosk = () => {
 setSelectedUser(null);
@@ -294,6 +352,14 @@ setActionJob(null);
 setPrefillDate('');
 setAddingLogDate(null);
 setAddForm({ jobId: '', timeIn: '', timeOut: '' });
+setLogViewMode('CALENDAR');
+setCalendarSelection(null);
+setCalendarDragState(null);
+setShowInactivityWarning(false);
+setIsUpdatingPin(false);
+setPinUpdateStep('NEW');
+setTempNewPin('');
+lastActivityRef.current = Date.now();
 setView('HOME');
 };
 
@@ -336,11 +402,19 @@ const result = await response.json();
 if (result.status === 'success') {
 Feedback.success();
 setActiveUser(selectedUser);
-setActiveUserPin(newPin);
 setUserStatus(result.currentStatus || { isClockedIn: false });
 setUserLogs(result.recentLogs || []);
 setEnteredPin('');
+
+if (newPin === '1234') {
+setIsUpdatingPin(true);
+setPinUpdateStep('NEW');
+setTempNewPin('');
+setView('UPDATE_PIN');
+} else {
+setActiveUserPin(newPin);
 setView('DASHBOARD');
+}
 } else {
 Feedback.error();
 setPinError(true);
@@ -358,11 +432,54 @@ setIsVerifyingPin(false);
 }
 };
 
+const commitPinUpdate = async (finalPin) => {
+setIsSubmitting(true);
+try {
+const response = await fetch(API_URL, {
+method: 'POST',
+headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+body: JSON.stringify({ 
+action: 'UPDATE_PIN', 
+userName: activeUser.name, 
+newPin: finalPin 
+})
+});
+const result = await response.json();
+if (result.status === 'success') {
+Feedback.success();
+setActiveUserPin(finalPin);
+setSuccessMessage("PIN Updated");
+setView('SUCCESS');
+setTimeout(() => {
+setView('DASHBOARD');
+setIsUpdatingPin(false);
+setEnteredPin('');
+setTempNewPin('');
+}, 2500);
+} else {
+Feedback.error();
+setActionError(result.message || "Failed to update PIN.");
+setPinUpdateStep('NEW');
+setEnteredPin('');
+setTempNewPin('');
+}
+} catch (err) {
+Feedback.error();
+setActionError("Network error while updating PIN.");
+setPinUpdateStep('NEW');
+setEnteredPin('');
+setTempNewPin('');
+} finally {
+setIsSubmitting(false);
+}
+};
+
 const initiatePunch = (action) => {
 if (action === 'OUT') commitPunch('OUT', null);
 else {
 setPendingAction(action);
 setView('SELECT_JOB');
+fetchPublicData(globalPin, true);
 }
 };
 
@@ -395,12 +512,12 @@ fetchPublicData(globalPin, true);
 Feedback.success();
 setSuccessMessage(`${action === 'OUT' ? 'Clocked out' : 'Clocked in to ' + job.name}`);
 setView('SUCCESS');
-setTimeout(() => resetKiosk(), 3000); 
+setTimeout(() => resetKiosk(), 2500); 
 } catch (error) {
 Feedback.error();
 setSuccessMessage("Network error. Please try again.");
 setView('SUCCESS');
-setTimeout(() => resetKiosk(), 2500);
+setTimeout(() => resetKiosk(), 1500);
 } finally {
 setIsSubmitting(false);
 }
@@ -613,6 +730,7 @@ setActionError(result.message);
 } else {
 Feedback.success();
 setConfirmDeleteId(null);
+setCalendarSelection(null);
 await refreshUserData(activeUser.name, activeUserPin);
 }
 } catch (error) {
@@ -650,6 +768,167 @@ return `https://drive.google.com/thumbnail?id=${match[1]}&sz=w1000`;
 }
 return url;
 };
+
+const renderUpdatePin = () => {
+const isConfirming = pinUpdateStep === 'CONFIRM';
+const title = isConfirming ? "Confirm New PIN" : "Enter New 4-Digit PIN";
+const subtitle = isConfirming ? "Re-enter your new PIN" : "Choose a new personal PIN (not 1234)";
+
+const handleUpdateDigit = (digit) => {
+if (enteredPin.length < 4 && !isSubmitting) {
+const newPinStr = enteredPin + digit;
+setEnteredPin(newPinStr);
+setPinError(false);
+
+if (newPinStr.length === 4) {
+if (!isConfirming) {
+if (newPinStr === '1234') {
+Feedback.error();
+setPinError(true);
+setActionError("1234 is the default setup PIN. Please choose a different PIN.");
+setTimeout(() => setEnteredPin(''), 500);
+} else {
+setTimeout(() => {
+setTempNewPin(newPinStr);
+setPinUpdateStep('CONFIRM');
+setEnteredPin('');
+}, 200);
+}
+} else {
+if (newPinStr !== tempNewPin) {
+Feedback.error();
+setPinError(true);
+setActionError("PINs do not match. Please try again.");
+setTimeout(() => {
+setPinUpdateStep('NEW');
+setEnteredPin('');
+setTempNewPin('');
+}, 1000);
+} else {
+commitPinUpdate(newPinStr);
+}
+}
+}
+}
+};
+
+return (
+<div className="flex flex-col min-h-full items-center justify-center p-4 sm:p-8 relative">
+{activeUserPin && activeUserPin !== '1234' && (
+<div className="absolute top-4 sm:top-8 left-4 sm:left-8">
+<button onClick={() => { Feedback.tap(); setIsUpdatingPin(false); setEnteredPin(''); setView('DASHBOARD'); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 transition-colors">
+<ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Cancel
+</button>
+</div>
+)}
+
+<div className="bg-stone-900 p-6 sm:p-10 rounded-3xl shadow-2xl border border-stone-800 flex flex-col items-center max-w-sm w-full mt-10 sm:mt-0">
+<div className="w-14 h-14 sm:w-16 sm:h-16 bg-[#991b1f]/20 text-[#991b1f] border border-[#991b1f]/30 rounded-full flex items-center justify-center mb-4 transition-all">
+{isSubmitting ? <Loader className="w-6 h-6 sm:w-8 sm:h-8 animate-spin" /> : <Lock className="w-6 h-6 sm:w-8 sm:h-8" />}
+</div>
+<h2 className="text-xl sm:text-2xl font-bold font-crimson text-stone-100 mb-1">{title}</h2>
+<p className="text-sm sm:text-base text-stone-400 mb-6 sm:mb-8 text-center">{subtitle}</p>
+
+<div className={`flex gap-3 sm:gap-4 mb-6 sm:mb-8 ${pinError ? 'animate-bounce' : ''}`}>
+{[...Array(4)].map((_, i) => (
+<div key={i} className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full transition-all duration-200 ${i < enteredPin.length ? 'bg-[#991b1f] shadow-[0_0_10px_rgba(153,27,31,0.5)] scale-110' : 'bg-stone-800'} ${pinError ? 'bg-rose-500' : ''}`} />
+))}
+</div>
+
+<div className="grid grid-cols-3 gap-3 sm:gap-4 w-full">
+{[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+<button key={num} disabled={isSubmitting} onPointerDown={() => { Feedback.tap(); handleUpdateDigit(num.toString()); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+{num}
+</button>
+))}
+<div className="h-14 sm:h-16"></div>
+<button disabled={isSubmitting} onPointerDown={() => { Feedback.tap(); handleUpdateDigit('0'); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+0
+</button>
+<button disabled={isSubmitting} onPointerDown={() => { Feedback.tap(); setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+<Delete className="w-5 h-5 sm:w-6 sm:h-6" />
+</button>
+</div>
+</div>
+</div>
+);
+};
+
+const renderGlobalPinScreen = () => (
+<div className="flex flex-col min-h-full items-center justify-center p-4 sm:p-8 relative">
+<div className="bg-stone-900 p-6 sm:p-10 rounded-3xl shadow-2xl border border-stone-800 flex flex-col items-center max-w-sm w-full">
+<div className="w-14 h-14 sm:w-16 sm:h-16 bg-[#991b1f]/20 text-[#991b1f] border border-[#991b1f]/30 rounded-full flex items-center justify-center mb-4 transition-all">
+{isLoadingData ? <Loader className="w-6 h-6 sm:w-8 sm:h-8 animate-spin" /> : <Lock className="w-6 h-6 sm:w-8 sm:h-8" />}
+</div>
+<h2 className="text-xl sm:text-2xl font-bold font-crimson text-stone-100 mb-1">Arrow Time Logs</h2>
+<p className="text-sm sm:text-base text-stone-400 mb-6 sm:mb-8 text-center">
+{isLoadingData ? "Connecting..." : "Enter Global Shop PIN"}
+</p>
+
+<div className={`flex gap-3 sm:gap-4 mb-6 sm:mb-8 ${pinError ? 'animate-bounce' : ''}`}>
+{[...Array(4)].map((_, i) => (
+<div key={i} className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full transition-all duration-200 ${i < enteredPin.length ? 'bg-[#991b1f] shadow-[0_0_10px_rgba(153,27,31,0.5)] scale-110' : 'bg-stone-800'} ${pinError ? 'bg-rose-500' : ''}`} />
+))}
+</div>
+
+<div className="grid grid-cols-3 gap-3 sm:gap-4 w-full">
+{[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+<button key={num} disabled={isLoadingData} onPointerDown={() => { Feedback.tap(); handleGlobalPinDigit(num.toString()); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+{num}
+</button>
+))}
+<div className="h-14 sm:h-16"></div>
+<button disabled={isLoadingData} onPointerDown={() => { Feedback.tap(); handleGlobalPinDigit('0'); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+0
+</button>
+<button disabled={isLoadingData} onPointerDown={() => { Feedback.tap(); setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+<Delete className="w-5 h-5 sm:w-6 sm:h-6" />
+</button>
+</div>
+</div>
+</div>
+);
+
+const renderPinScreen = () => (
+<div className="flex flex-col min-h-full items-center justify-center p-4 sm:p-8 relative">
+<div className="absolute top-4 sm:top-8 left-4 sm:left-8">
+<button onClick={() => { Feedback.tap(); setView('HOME'); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 transition-colors">
+<ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Back
+</button>
+</div>
+
+<div className="bg-stone-900 p-6 sm:p-10 rounded-3xl shadow-2xl border border-stone-800 flex flex-col items-center max-w-sm w-full mt-10 sm:mt-0">
+<div className="w-14 h-14 sm:w-16 sm:h-16 bg-[#991b1f]/20 text-[#991b1f] border border-[#991b1f]/30 rounded-full flex items-center justify-center mb-4 transition-all">
+{isVerifyingPin ? <Loader className="w-6 h-6 sm:w-8 sm:h-8 animate-spin" /> : <Lock className="w-6 h-6 sm:w-8 sm:h-8" />}
+</div>
+<h2 className="text-xl sm:text-2xl font-bold font-crimson text-stone-100 mb-1">{selectedUser?.name}</h2>
+<p className="text-sm sm:text-base text-stone-400 mb-6 sm:mb-8 text-center">
+{isVerifyingPin ? "Authenticating..." : "Enter your personal PIN"}
+</p>
+
+<div className={`flex gap-3 sm:gap-4 mb-6 sm:mb-8 ${pinError ? 'animate-bounce' : ''}`}>
+{[...Array(4)].map((_, i) => (
+<div key={i} className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full transition-all duration-200 ${i < enteredPin.length ? 'bg-[#991b1f] shadow-[0_0_10px_rgba(153,27,31,0.5)] scale-110' : 'bg-stone-800'} ${pinError ? 'bg-rose-500' : ''}`} />
+))}
+</div>
+
+<div className="grid grid-cols-3 gap-3 sm:gap-4 w-full">
+{[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+<button key={num} disabled={isVerifyingPin} onPointerDown={() => { Feedback.tap(); handlePinDigit(num.toString()); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+{num}
+</button>
+))}
+<div className="h-14 sm:h-16"></div>
+<button disabled={isVerifyingPin} onPointerDown={() => { Feedback.tap(); handlePinDigit('0'); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+0
+</button>
+<button disabled={isVerifyingPin} onPointerDown={() => { Feedback.tap(); setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
+<Delete className="w-5 h-5 sm:w-6 sm:h-6" />
+</button>
+</div>
+</div>
+</div>
+);
 
 const renderHome = () => (
 <div className="flex flex-col min-h-full items-center justify-start sm:justify-center p-4 sm:p-8 py-8 sm:py-12 space-y-8 sm:space-y-12">
@@ -696,93 +975,26 @@ className="p-4 sm:p-6 bg-stone-900 rounded-[2rem] sm:rounded-3xl shadow-lg borde
 </div>
 </div>
 {isWorking && (
-<div className="flex items-center gap-2 px-3 py-2 bg-emerald-500/10 text-emerald-400 rounded-xl text-xs sm:text-sm font-medium w-full border border-emerald-500/20">
-<Briefcase className="w-4 h-4 shrink-0" />
-<span className="truncate" title={`${status.currentJobId} - ${status.currentJobName}`}>
-<span className="font-bold mr-1">{status.currentJobId}</span> 
-{status.currentJobName}
-</span>
+<div className="flex items-center gap-3 px-3 py-2 sm:py-3 bg-emerald-500/10 text-emerald-400 rounded-xl text-xs sm:text-sm font-medium w-full border border-emerald-500/20 text-left">
+{(() => {
+const homeActiveJob = jobs.find(j => j.id === status.currentJobId);
+return homeActiveJob && homeActiveJob.imageUrl ? (
+<img src={getDirectImageUrl(homeActiveJob.imageUrl)} className="w-12 h-12 sm:w-16 sm:h-16 rounded-md object-cover shrink-0 border border-emerald-500/30 shadow-sm" alt="Job" />
+) : (
+<div className="w-12 h-12 sm:w-16 sm:h-16 rounded-md bg-emerald-900/30 flex items-center justify-center shrink-0 border border-emerald-500/30">
+<Briefcase className="w-5 h-5 sm:w-6 sm:h-6 shrink-0 text-emerald-500/50" />
+</div>
+);
+})()}
+<div className="flex flex-col min-w-0 justify-center">
+<span className="font-bold truncate">{status.currentJobId}</span> 
+<span className="truncate text-emerald-500/80 mt-0.5" title={status.currentJobName}>{status.currentJobName}</span>
+</div>
 </div>
 )}
 </button>
 );
 })}
-</div>
-</div>
-);
-
-const renderGlobalPinScreen = () => (
-<div className="flex flex-col min-h-full items-center justify-center p-4 sm:p-8 relative">
-<div className="bg-stone-900 p-6 sm:p-10 rounded-3xl shadow-2xl border border-stone-800 flex flex-col items-center max-w-sm w-full">
-<div className="w-14 h-14 sm:w-16 sm:h-16 bg-[#991b1f]/20 text-[#991b1f] border border-[#991b1f]/30 rounded-full flex items-center justify-center mb-4 transition-all">
-{isLoadingData ? <Loader className="w-6 h-6 sm:w-8 sm:h-8 animate-spin" /> : <Lock className="w-6 h-6 sm:w-8 sm:h-8" />}
-</div>
-<h2 className="text-xl sm:text-2xl font-bold font-crimson text-stone-100 mb-1">Arrow Time Logs</h2>
-<p className="text-sm sm:text-base text-stone-400 mb-6 sm:mb-8 text-center">
-{isLoadingData ? "Connecting..." : "Enter Global Shop PIN"}
-</p>
-
-<div className={`flex gap-3 sm:gap-4 mb-6 sm:mb-8 ${pinError ? 'animate-bounce' : ''}`}>
-{[...Array(4)].map((_, i) => (
-<div key={i} className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full transition-all duration-200 ${i < enteredPin.length ? 'bg-[#991b1f] shadow-[0_0_10px_rgba(153,27,31,0.5)] scale-110' : 'bg-stone-800'} ${pinError ? 'bg-rose-500' : ''}`} />
-))}
-</div>
-
-<div className="grid grid-cols-3 gap-3 sm:gap-4 w-full">
-{[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-<button key={num} disabled={isLoadingData} onClick={() => { Feedback.tap(); handleGlobalPinDigit(num.toString()); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
-{num}
-</button>
-))}
-<div className="h-14 sm:h-16"></div>
-<button disabled={isLoadingData} onClick={() => { Feedback.tap(); handleGlobalPinDigit('0'); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
-0
-</button>
-<button disabled={isLoadingData} onClick={() => { Feedback.tap(); setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
-<Delete className="w-5 h-5 sm:w-6 sm:h-6" />
-</button>
-</div>
-</div>
-</div>
-);
-
-const renderPinScreen = () => (
-<div className="flex flex-col min-h-full items-center justify-center p-4 sm:p-8 relative">
-<div className="absolute top-4 sm:top-8 left-4 sm:left-8">
-<button onClick={() => { Feedback.tap(); setView('HOME'); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 transition-colors">
-<ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Back
-</button>
-</div>
-
-<div className="bg-stone-900 p-6 sm:p-10 rounded-3xl shadow-2xl border border-stone-800 flex flex-col items-center max-w-sm w-full mt-10 sm:mt-0">
-<div className="w-14 h-14 sm:w-16 sm:h-16 bg-[#991b1f]/20 text-[#991b1f] border border-[#991b1f]/30 rounded-full flex items-center justify-center mb-4 transition-all">
-{isVerifyingPin ? <Loader className="w-6 h-6 sm:w-8 sm:h-8 animate-spin" /> : <Lock className="w-6 h-6 sm:w-8 sm:h-8" />}
-</div>
-<h2 className="text-xl sm:text-2xl font-bold font-crimson text-stone-100 mb-1">{selectedUser?.name}</h2>
-<p className="text-sm sm:text-base text-stone-400 mb-6 sm:mb-8 text-center">
-{isVerifyingPin ? "Authenticating..." : "Enter your personal PIN"}
-</p>
-
-<div className={`flex gap-3 sm:gap-4 mb-6 sm:mb-8 ${pinError ? 'animate-bounce' : ''}`}>
-{[...Array(4)].map((_, i) => (
-<div key={i} className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full transition-all duration-200 ${i < enteredPin.length ? 'bg-[#991b1f] shadow-[0_0_10px_rgba(153,27,31,0.5)] scale-110' : 'bg-stone-800'} ${pinError ? 'bg-rose-500' : ''}`} />
-))}
-</div>
-
-<div className="grid grid-cols-3 gap-3 sm:gap-4 w-full">
-{[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-<button key={num} disabled={isVerifyingPin} onClick={() => { Feedback.tap(); handlePinDigit(num.toString()); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
-{num}
-</button>
-))}
-<div className="h-14 sm:h-16"></div>
-<button disabled={isVerifyingPin} onClick={() => { Feedback.tap(); handlePinDigit('0'); }} className="h-14 sm:h-16 text-xl sm:text-2xl font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 active:bg-stone-600 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
-0
-</button>
-<button disabled={isVerifyingPin} onClick={() => { Feedback.tap(); setEnteredPin(prev => prev.slice(0, -1)); setPinError(false); }} className="h-14 sm:h-16 flex items-center justify-center text-stone-400 bg-stone-800 hover:bg-rose-900/40 hover:text-rose-400 active:bg-rose-900/60 active:scale-90 disabled:opacity-50 rounded-2xl transition-all duration-100">
-<Delete className="w-5 h-5 sm:w-6 sm:h-6" />
-</button>
-</div>
 </div>
 </div>
 );
@@ -809,6 +1021,18 @@ const renderDashboard = () => (
 <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
 Active Shift
 </span>
+
+{(() => {
+// Fallback logic to ensure we get the job ID even if the backend only sent the name
+const activeJobId = userStatus.currentJobId || userStatuses[activeUser.name]?.currentJobId;
+const activeJob = jobs.find(j => (activeJobId && j.id === activeJobId) || (userStatus.currentJobName && j.name === userStatus.currentJobName));
+return activeJob && activeJob.imageUrl ? (
+<div className="w-24 h-24 sm:w-32 sm:h-32 rounded-[1.5rem] overflow-hidden shadow-lg border border-emerald-500/30 mb-3 sm:mb-4">
+<img src={getDirectImageUrl(activeJob.imageUrl)} alt={activeJob.name} className="w-full h-full object-cover" />
+</div>
+) : null;
+})()}
+
 <span className="text-2xl sm:text-4xl font-bold font-crimson text-emerald-100 mb-3 text-center">{userStatus.currentJobName}</span>
 <span className="text-emerald-400 font-medium font-sans text-sm sm:text-lg bg-emerald-950/50 px-3 sm:px-4 py-1.5 rounded-full border border-emerald-500/20">
 Duration: {formatDuration(userStatus.since)}
@@ -853,15 +1077,21 @@ Duration: {formatDuration(userStatus.since)}
 )}
 </div>
 
-<div className="grid grid-cols-2 gap-3 sm:gap-4 w-full max-w-lg mt-2 sm:mt-4">
-<button onClick={() => { Feedback.tap(); setView('MY_LOGS'); }} className="flex items-center justify-center gap-2 sm:gap-3 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-[#991b1f] hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-300 hover:text-white shadow-md">
+<div className="flex flex-col gap-2 sm:gap-4 w-full max-w-lg mt-2 sm:mt-4">
+<button onClick={() => { Feedback.tap(); setView('MY_LOGS'); }} className="w-full flex flex-row items-center justify-center gap-2 sm:gap-3 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-[#991b1f] hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-300 hover:text-white shadow-md">
 <CalendarDays className="w-5 h-5 sm:w-6 sm:h-6 text-[#991b1f] group-hover:text-white transition-colors" />
-<span className="font-bold text-sm sm:text-lg font-sans">Time Logs</span>
+<span className="font-bold text-sm sm:text-lg font-sans">View My Time Logs</span>
 </button>
-<button onClick={() => { Feedback.tap(); resetKiosk(); }} className="flex items-center justify-center gap-2 sm:gap-3 p-4 sm:p-5 bg-stone-900 border border-stone-800 hover:border-stone-600 hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-400 hover:text-white shadow-md">
+<div className="grid grid-cols-2 gap-2 sm:gap-4 w-full">
+<button onClick={() => { Feedback.tap(); setIsUpdatingPin(true); setPinUpdateStep('NEW'); setTempNewPin(''); setEnteredPin(''); setView('UPDATE_PIN'); }} className="flex flex-col sm:flex-row items-center justify-center gap-1.5 sm:gap-3 p-3 sm:p-5 bg-stone-900 border border-stone-800 hover:border-amber-500 hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-300 hover:text-white shadow-md">
+<Lock className="w-5 h-5 sm:w-6 sm:h-6 text-amber-500 group-hover:text-white transition-colors" />
+<span className="font-bold text-xs sm:text-lg font-sans">Change PIN</span>
+</button>
+<button onClick={() => { Feedback.tap(); resetKiosk(); }} className="flex flex-col sm:flex-row items-center justify-center gap-1.5 sm:gap-3 p-3 sm:p-5 bg-stone-900 border border-stone-800 hover:border-stone-600 hover:bg-stone-800 rounded-2xl transition-all active:scale-95 group text-stone-400 hover:text-white shadow-md">
 <LogOut className="w-5 h-5 sm:w-6 sm:h-6 group-hover:text-stone-300 transition-colors" />
-<span className="font-bold text-sm sm:text-lg font-sans">Log Out</span>
+<span className="font-bold text-xs sm:text-lg font-sans">Log Out</span>
 </button>
+</div>
 </div>
 </div>
 </div>
@@ -890,22 +1120,391 @@ const toggleDate = (dateLabel) => {
 setExpandedDates(prev => ({ ...prev, [dateLabel]: !prev[dateLabel] }));
 };
 
+const formatTimeForDisplay = (mins) => {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    const period = h >= 12 ? 'PM' : 'AM';
+    const displayH = h % 12 === 0 ? 12 : h % 12;
+    return `${displayH}:${String(m).padStart(2, '0')} ${period}`;
+};
+
+const saveCalendarSelection = async () => {
+    if (!calendarSelection.jobId) {
+        Feedback.error();
+        setActionError("Please select a job.");
+        return;
+    }
+
+    const jobSelected = jobs.find(j => j.id === calendarSelection.jobId);
+    const formatTime24 = (mins) => `${String(Math.floor(mins/60)).padStart(2,'0')}:${String(mins%60).padStart(2,'0')}`;
+    const timeIn = formatTime24(calendarSelection.startMins);
+    const timeOut = formatTime24(calendarSelection.endMins);
+
+    if (checkOverlap(calendarSelection.date, timeIn, timeOut, calendarSelection.logId)) {
+        Feedback.error();
+        setActionError("Punch Denied: This shift overlaps with an existing time log on that date.");
+        return;
+    }
+
+    setIsSubmitting(true);
+    const isEdit = !!calendarSelection.logId;
+    const payload = isEdit ? {
+        action: 'EDIT_LOG',
+        logId: calendarSelection.logId,
+        jobId: jobSelected.id,
+        jobName: jobSelected.name,
+        timeIn: timeIn,
+        timeOut: timeOut
+    } : {
+        action: 'ADD_MANUAL',
+        userName: activeUser.name,
+        logId: 'log-' + Math.random().toString(36).substr(2, 9),
+        date: calendarSelection.date,
+        jobId: jobSelected.id,
+        jobName: jobSelected.name,
+        timeIn: timeIn,
+        timeOut: timeOut
+    };
+
+    try {
+        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+        const result = await res.json();
+        if (result.status === 'error') {
+            Feedback.error();
+            setActionError(result.message);
+        } else {
+            Feedback.success();
+            setCalendarSelection(null);
+            await refreshUserData(activeUser.name, activeUserPin);
+        }
+    } catch (error) {
+        Feedback.error();
+        console.error("Failed to save calendar log.", error);
+    } finally {
+        setIsSubmitting(false);
+    }
+};
+
+const renderCalendarView = () => {
+    const pixelsPerMinute = 1.5;
+    const hourHeight = pixelsPerMinute * 60;
+    const todayMs = new Date().setHours(0,0,0,0);
+    const minDateMs = todayMs - (13 * 86400000); // Generate at least 14 days backward
+    const earliestLogDateMs = sortedDateLabels.length > 0 ? Math.min(...sortedDateLabels.map(d => getSafeDate(d).getTime())) : minDateMs;
+    const startDateMs = Math.min(minDateMs, earliestLogDateMs);
+
+    const calDates = [];
+    let curr = new Date(startDateMs);
+    while (curr.getTime() <= todayMs) {
+        calDates.push(new Date(curr));
+        curr.setDate(curr.getDate() + 1);
+    }
+
+    const formatYYYYMMDD = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    const todayStr = formatYYYYMMDD(currentTime);
+
+    const handleHandlePointerDown = (e, type) => {
+        e.stopPropagation();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setCalendarDragState({
+            type,
+            startY: e.clientY,
+            initialStart: calendarSelection.startMins,
+            initialEnd: calendarSelection.endMins
+        });
+    };
+
+    const handleHandlePointerMove = (e) => {
+        if (!calendarDragState) return;
+        const deltaY = e.clientY - calendarDragState.startY;
+        const deltaMins = Math.round(deltaY / pixelsPerMinute / 15) * 15;
+
+        if (calendarDragState.type === 'top') {
+            const newStart = Math.min(calendarDragState.initialStart + deltaMins, calendarSelection.endMins - 15);
+            setCalendarSelection(prev => ({ ...prev, startMins: Math.max(0, newStart) }));
+        } else if (calendarDragState.type === 'bottom') {
+            const newEnd = Math.max(calendarDragState.initialEnd + deltaMins, calendarSelection.startMins + 15);
+            setCalendarSelection(prev => ({ ...prev, endMins: Math.min(1440, newEnd) }));
+        } else if (calendarDragState.type === 'move') {
+            const blockDuration = calendarDragState.initialEnd - calendarDragState.initialStart;
+            const newStart = Math.max(0, calendarDragState.initialStart + deltaMins);
+            const finalStart = Math.min(newStart, 1440 - blockDuration);
+            setCalendarSelection(prev => ({ ...prev, startMins: finalStart, endMins: finalStart + blockDuration }));
+        }
+    };
+
+    const handleHandlePointerUp = (e) => {
+        if (calendarDragState) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+            setCalendarDragState(null);
+        }
+    };
+
+    return (
+        <div className="flex flex-col flex-1 min-h-0 bg-stone-900 border border-stone-800 rounded-3xl overflow-hidden shadow-xl mt-4 sm:mt-0 relative">
+            <div ref={calendarScrollRef} className="flex-1 overflow-auto relative touch-pan-x touch-pan-y [color-scheme:dark]">
+                <div className="flex flex-col min-w-max">
+                    {/* Header Row - Sticky Top */}
+                    <div className="flex sticky top-0 z-40 bg-stone-950/95 backdrop-blur shadow-md">
+                        <div className="w-14 sm:w-16 shrink-0 border-r border-b border-stone-800/80 bg-stone-950/95 sticky left-0 z-50"></div>
+                        {calDates.map((calDate) => {
+                            const dateStr = formatYYYYMMDD(calDate);
+                            const isToday = dateStr === todayStr;
+                            return (
+                                <div key={dateStr} className={`flex-1 min-w-[120px] sm:min-w-[140px] border-r border-b border-stone-800/80 h-10 flex items-center justify-center text-[10px] sm:text-xs font-bold uppercase tracking-wider ${isToday ? 'bg-[#991b1f] text-white shadow-inner' : 'text-stone-400'}`}>
+                                    {calDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                                </div>
+                            );
+                        })}
+                    </div>
+
+                    {/* Grid Body */}
+                    <div className="flex relative" style={{ height: `${24 * hourHeight}px` }}>
+                        {/* Horizontal Hour Lines (Absolute to fill width) */}
+                        <div className="absolute inset-0 pointer-events-none z-0">
+                            {Array.from({length: 25}).map((_, i) => (
+                                <div key={i} className="absolute w-full border-t border-stone-800/40" style={{ top: `${i * hourHeight}px` }}></div>
+                            ))}
+                        </div>
+
+                        {/* Sidebar - Sticky Left */}
+                        <div className="w-14 sm:w-16 shrink-0 sticky left-0 z-30 bg-stone-900/95 backdrop-blur-sm border-r border-stone-800/80">
+                            {Array.from({length: 25}).map((_, i) => (
+                                <div key={i} className="absolute right-2 text-[9px] sm:text-[10px] text-stone-500 font-bold -translate-y-1/2" style={{ top: `${i * hourHeight}px` }}>
+                                    {i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : i === 24 ? '12 AM' : `${i-12} PM`}
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Columns */}
+                        {calDates.map((calDate) => {
+                            const dateStr = formatYYYYMMDD(calDate);
+                            const isToday = dateStr === todayStr;
+                            const dayLogs = userLogs.filter(l => formatYYYYMMDD(getSafeDate(l.date)) === dateStr);
+
+                            return (
+                                <div key={dateStr} className="flex-1 min-w-[120px] sm:min-w-[140px] border-r border-stone-800/40 relative group z-10"
+                                     onPointerDown={(e) => {
+                                         if (e.target.closest('.resize-handle') || e.target.closest('.log-entry')) return;
+                                         Feedback.tap();
+                                         const rect = e.currentTarget.getBoundingClientRect();
+                                         const y = e.clientY - rect.top;
+                                         let mins = Math.floor(y / pixelsPerMinute);
+                                         mins = Math.floor(mins / 15) * 15;
+                                         setCalendarSelection({ date: dateStr, startMins: mins, endMins: Math.min(1440, mins + 60), jobId: '' });
+                                     }}
+                                >
+                                    {/* Current Time Indicator */}
+                                    {isToday && (
+                                        <div
+                                            className="absolute left-0 right-0 border-t-2 border-[#991b1f] z-[15] pointer-events-none shadow-[0_0_8px_rgba(153,27,31,0.5)]"
+                                            style={{ top: `${(currentTime.getHours() * 60 + currentTime.getMinutes()) * pixelsPerMinute}px` }}
+                                        >
+                                            <div className="absolute -left-1.5 -top-1.5 w-3 h-3 rounded-full bg-[#991b1f]"></div>
+                                        </div>
+                                    )}
+
+                                    {/* Hollow Cursor (Active Selection) */}
+                                    {calendarSelection && calendarSelection.date === dateStr && (
+                                        <div
+                                            className="absolute left-1 right-1 border-2 border-dashed border-emerald-400 bg-emerald-400/10 rounded-lg z-30 touch-none select-none flex flex-col justify-between shadow-[0_0_15px_rgba(52,211,153,0.15)]"
+                                            style={{
+                                                top: `${calendarSelection.startMins * pixelsPerMinute}px`,
+                                                height: `${(calendarSelection.endMins - calendarSelection.startMins) * pixelsPerMinute}px`
+                                            }}
+                                        >
+                                            {/* Top Handle */}
+                                            <div className="h-6 sm:h-8 -mt-3 sm:-mt-4 flex items-center justify-center cursor-ns-resize z-40 resize-handle"
+                                                 onPointerDown={(e) => handleHandlePointerDown(e, 'top')}
+                                                 onPointerMove={handleHandlePointerMove}
+                                                 onPointerUp={handleHandlePointerUp}
+                                                 onPointerCancel={handleHandlePointerUp}>
+                                                <div className="w-10 h-1.5 sm:h-2 bg-emerald-400 rounded-full shadow border border-emerald-600/50"></div>
+                                            </div>
+
+                                            {/* Move Area */}
+                                            <div className="flex-1 min-h-0 flex items-center justify-center cursor-move resize-handle"
+                                                 onPointerDown={(e) => handleHandlePointerDown(e, 'move')}
+                                                 onPointerMove={handleHandlePointerMove}
+                                                 onPointerUp={handleHandlePointerUp}
+                                                 onPointerCancel={handleHandlePointerUp}>
+                                                <span className="text-[10px] sm:text-xs font-bold text-emerald-900 drop-shadow-sm bg-emerald-400 px-2 py-0.5 rounded shadow whitespace-nowrap">
+                                                    {formatTimeForDisplay(calendarSelection.startMins)} - {formatTimeForDisplay(calendarSelection.endMins)}
+                                                </span>
+                                            </div>
+
+                                            {/* Bottom Handle */}
+                                            <div className="h-6 sm:h-8 -mb-3 sm:-mb-4 flex items-center justify-center cursor-ns-resize z-40 resize-handle"
+                                                 onPointerDown={(e) => handleHandlePointerDown(e, 'bottom')}
+                                                 onPointerMove={handleHandlePointerMove}
+                                                 onPointerUp={handleHandlePointerUp}
+                                                 onPointerCancel={handleHandlePointerUp}>
+                                                <div className="w-10 h-1.5 sm:h-2 bg-emerald-400 rounded-full shadow border border-emerald-600/50"></div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Existing Logs */}
+                                    {dayLogs.map(log => {
+                                        if (!log.timeIn24) return null;
+                                        const startParts = log.timeIn24.split(':');
+                                        const startMins = parseInt(startParts[0]) * 60 + parseInt(startParts[1]);
+
+                                        let endMins;
+                                        if (log.timeOut24) {
+                                            const endParts = log.timeOut24.split(':');
+                                            endMins = parseInt(endParts[0]) * 60 + parseInt(endParts[1]);
+                                        } else {
+                                            if (isToday) {
+                                                endMins = currentTime.getHours() * 60 + currentTime.getMinutes();
+                                            } else {
+                                                endMins = 1440;
+                                            }
+                                        }
+                                        if (endMins < startMins) endMins = 1440;
+
+                                        const top = startMins * pixelsPerMinute;
+                                        const height = Math.max(15 * pixelsPerMinute, (endMins - startMins) * pixelsPerMinute);
+                                        const isActive = !log.timeOut24;
+                                        const isBeingEdited = calendarSelection && calendarSelection.logId === log.id;
+
+                                        if (isBeingEdited) return null;
+
+                                        return (
+                                            <div
+                                                key={log.id}
+                                                className={`log-entry absolute left-1 right-1 rounded-lg p-1.5 sm:p-2 overflow-hidden text-[10px] sm:text-xs z-20 shadow flex flex-col transition-all cursor-pointer pointer-events-auto
+                                                    ${isActive ? 'bg-emerald-500/20 border-2 border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.3)]' : 'bg-stone-800 border border-stone-700 hover:border-stone-500'}`}
+                                                style={{ top: `${top}px`, height: `${height}px` }}
+                                                onPointerDown={(e) => {
+                                                    e.stopPropagation();
+                                                    Feedback.tap();
+                                                    if (log.isEditable === false) return; // Prevent editing locked logs
+                                                    setCalendarSelection({
+                                                        logId: log.id,
+                                                        date: dateStr,
+                                                        startMins: startMins,
+                                                        endMins: endMins,
+                                                        jobId: log.jobId || ''
+                                                    });
+                                                }}
+                                            >
+                                                <div className={`font-bold leading-none ${isActive ? 'text-emerald-400' : 'text-stone-200'}`}>
+                                                    <span className="block truncate">{log.jobId}</span>
+                                                    {log.jobName && <span className="block truncate text-[9px] sm:text-[10px] opacity-80 mt-0.5">{log.jobName}</span>}
+                                                </div>
+                                                <div className={`truncate mt-auto pt-0.5 ${isActive ? 'text-emerald-500/80 font-medium' : 'text-stone-400'}`}>
+                                                    {log.timeIn} - {isActive ? 'Now' : log.timeOut}
+                                                </div>
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            </div>
+
+            <div className="p-3 bg-stone-950 border-t border-stone-800 text-center text-xs text-stone-500 shrink-0 shadow-[0_-5px_15px_rgba(0,0,0,0.5)] z-20">
+                Tap anywhere to add a time block. Drag the handles to adjust times.
+            </div>
+
+            {/* Bottom Active Selection Panel */}
+            {calendarSelection && (
+                <div className="absolute bottom-4 left-4 right-4 bg-stone-900 border border-emerald-500/50 shadow-[0_10px_40px_rgba(0,0,0,0.8)] z-50 p-4 rounded-2xl flex flex-col sm:flex-row gap-4 items-center animate-in slide-in-from-bottom-4">
+                    <div className="flex flex-col flex-1 w-full">
+                        <label className="text-[10px] text-emerald-500/80 font-bold uppercase mb-1.5 tracking-wider">{calendarSelection.logId ? 'Edit Job for' : 'Select Job for'} {formatHeaderDate(calendarSelection.date)}</label>
+                        <select
+                            value={calendarSelection.jobId}
+                            onChange={e => setCalendarSelection({...calendarSelection, jobId: e.target.value})}
+                            className="w-full p-3 bg-stone-950 border border-stone-700 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-stone-100 text-sm font-bold shadow-inner"
+                        >
+                            <option value="">Select a job...</option>
+                            {jobs.map(j => <option key={j.id} value={j.id}>{j.id} - {j.name}</option>)}
+                        </select>
+                    </div>
+                    
+                    <div className="flex gap-3 w-full sm:w-auto shrink-0">
+                        <div className="flex flex-col flex-1 sm:w-24">
+                            <label className="text-[10px] text-stone-400 font-bold uppercase mb-1.5 ml-1">Time In</label>
+                            <input type="time"
+                                   value={`${String(Math.floor(calendarSelection.startMins/60)).padStart(2,'0')}:${String(calendarSelection.startMins%60).padStart(2,'0')}`}
+                                   onChange={(e) => {
+                                       const parts = e.target.value.split(':');
+                                       if(parts.length===2) setCalendarSelection({...calendarSelection, startMins: parseInt(parts[0])*60 + parseInt(parts[1])});
+                                   }}
+                                   className="w-full p-3 bg-stone-950 border border-stone-700 rounded-xl focus:ring-2 focus:ring-emerald-500 text-stone-100 text-sm font-bold [color-scheme:dark]" />
+                        </div>
+                        <div className="flex flex-col flex-1 sm:w-24">
+                            <label className="text-[10px] text-stone-400 font-bold uppercase mb-1.5 ml-1">Time Out</label>
+                            <input type="time"
+                                   value={`${String(Math.floor(calendarSelection.endMins/60)).padStart(2,'0')}:${String(calendarSelection.endMins%60).padStart(2,'0')}`}
+                                   onChange={(e) => {
+                                       const parts = e.target.value.split(':');
+                                       if(parts.length===2) setCalendarSelection({...calendarSelection, endMins: parseInt(parts[0])*60 + parseInt(parts[1])});
+                                   }}
+                                   className="w-full p-3 bg-stone-950 border border-stone-700 rounded-xl focus:ring-2 focus:ring-emerald-500 text-stone-100 text-sm font-bold [color-scheme:dark]" />
+                        </div>
+                    </div>
+
+                    <div className="flex w-full sm:w-auto items-center justify-between gap-4 sm:pl-5 sm:border-l border-stone-800 shrink-0">
+                        {confirmDeleteId === calendarSelection.logId ? (
+                            <div className="flex gap-2 w-full sm:w-auto items-center">
+                                <span className="text-rose-500 font-bold text-xs uppercase tracking-widest mr-1 hidden sm:inline">Delete?</span>
+                                <button onClick={() => deleteLog(calendarSelection.logId)} disabled={isSubmitting} className="flex-1 sm:flex-none px-4 py-2 sm:py-3.5 bg-rose-600 text-white hover:bg-rose-500 rounded-xl font-bold shadow-sm active:scale-95 transition-all text-sm">Yes</button>
+                                <button onClick={() => { Feedback.tap(); setConfirmDeleteId(null); }} disabled={isSubmitting} className="flex-1 sm:flex-none px-4 py-2 sm:py-3.5 bg-stone-800 text-stone-300 hover:text-white rounded-xl border border-stone-700 font-bold shadow-sm active:scale-95 transition-all text-sm">No</button>
+                            </div>
+                        ) : (
+                            <div className="flex gap-2 w-full sm:w-auto">
+                                <button onClick={() => { Feedback.tap(); setCalendarSelection(null); setConfirmDeleteId(null); }} disabled={isSubmitting} className="flex flex-1 sm:flex-none items-center justify-center p-3 sm:p-4 bg-stone-800 text-stone-400 hover:text-white hover:bg-stone-700 rounded-xl transition-all border border-stone-700 active:scale-95 disabled:opacity-50">
+                                    <X className="w-5 h-5 sm:w-6 sm:h-6" />
+                                </button>
+                                {calendarSelection.logId && (
+                                    <button onClick={(e) => { e.preventDefault(); Feedback.tap(); setConfirmDeleteId(calendarSelection.logId); }} disabled={isSubmitting} className="flex flex-1 sm:flex-none items-center justify-center p-3 sm:p-4 bg-rose-500/10 text-rose-500 hover:text-white hover:bg-rose-500/80 rounded-xl transition-all border border-rose-500/30 active:scale-95 disabled:opacity-50">
+                                        <Trash className="w-5 h-5 sm:w-6 sm:h-6" />
+                                    </button>
+                                )}
+                                <button onClick={saveCalendarSelection} disabled={isSubmitting} className="flex flex-1 sm:flex-none flex-col items-center justify-center px-6 py-2 sm:py-2.5 bg-emerald-500 text-stone-950 hover:bg-emerald-400 rounded-xl transition-all border border-emerald-600 shadow-[0_0_15px_rgba(16,185,129,0.3)] active:scale-95 disabled:opacity-50 font-bold">
+                                    {isSubmitting ? <Loader className="w-5 h-5 sm:w-6 sm:h-6 animate-spin" /> : (
+                                        <>
+                                            <CheckCircle className="w-5 h-5 mb-0.5" />
+                                            <span className="text-[10px] uppercase tracking-widest">Save</span>
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
 return (
-<div className="flex flex-col min-h-full max-w-5xl mx-auto p-4 sm:p-8">
-<div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6 sm:mb-8 border-b border-stone-800 pb-4 sm:pb-6 w-full">
-<button onClick={() => { Feedback.tap(); setView('DASHBOARD'); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors">
+<div className="flex flex-col h-full max-w-5xl mx-auto p-4 sm:p-8 w-full">
+<div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6 sm:mb-8 border-b border-stone-800 pb-4 sm:pb-6 w-full shrink-0">
+<button onClick={() => { Feedback.tap(); setView('DASHBOARD'); }} className="flex items-center gap-1 sm:gap-2 text-stone-400 hover:text-white text-base sm:text-lg font-medium p-2 -ml-2 transition-colors shrink-0">
 <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" /> Dashboard
 </button>
-<button onClick={() => { Feedback.tap(); setView('MANUAL_LOG'); }} className="flex items-center justify-center w-full sm:w-auto gap-2 bg-[#991b1f] text-white px-4 sm:px-5 py-2.5 rounded-xl hover:bg-[#b02227] active:scale-95 font-medium transition-transform shadow-lg text-sm sm:text-base">
+
+<div className="flex items-center bg-stone-900 p-1 rounded-xl border border-stone-800 w-full sm:w-auto self-center mx-auto">
+<button onClick={() => { Feedback.tap(); setLogViewMode('LIST'); }} className={`flex-1 sm:w-32 py-2 rounded-lg text-sm font-bold transition-all ${logViewMode === 'LIST' ? 'bg-[#991b1f] text-white shadow-md' : 'text-stone-400 hover:text-stone-200'}`}>List</button>
+<button onClick={() => { Feedback.tap(); setLogViewMode('CALENDAR'); }} className={`flex-1 sm:w-32 py-2 rounded-lg text-sm font-bold transition-all ${logViewMode === 'CALENDAR' ? 'bg-[#991b1f] text-white shadow-md' : 'text-stone-400 hover:text-stone-200'}`}>Calendar</button>
+</div>
+
+<button onClick={() => { Feedback.tap(); setView('MANUAL_LOG'); }} className="flex items-center justify-center w-full sm:w-auto gap-2 bg-stone-800 text-stone-300 hover:text-white px-4 sm:px-5 py-2.5 rounded-xl hover:bg-stone-700 active:scale-95 font-medium transition-all shadow-sm border border-stone-700 text-sm sm:text-base shrink-0">
 <Plus className="w-4 h-4 sm:w-5 sm:h-5" /> Add Missing Log
 </button>
 </div>
 
-<div className="mb-4 sm:mb-6">
+<div className="mb-4 sm:mb-6 shrink-0">
 <h2 className="text-3xl sm:text-4xl font-bold font-crimson text-stone-100">Time Logs</h2>
 <p className="text-sm sm:text-base text-stone-400 mt-1">Viewing recent pay periods. Past periods are locked for payroll.</p>
 </div>
 
+{logViewMode === 'CALENDAR' ? renderCalendarView() : (
 <div className="bg-stone-900 rounded-2xl sm:rounded-3xl shadow-xl border border-stone-800 flex flex-col flex-1 min-h-0 overflow-hidden">
 {Object.keys(groupedLogs).length === 0 ? (
 <div className="p-8 sm:p-16 text-center text-stone-500 text-base sm:text-lg">No recent logs found.</div>
@@ -1104,6 +1703,7 @@ title="Delete Log"
 </div>
 )}
 </div>
+)}
 </div>
 );
 };
@@ -1136,11 +1736,11 @@ const renderManualLog = () => (
 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
 <div>
 <label className="block text-xs sm:text-sm font-bold text-stone-400 mb-1.5 sm:mb-2">Time In</label>
-<input required type="time" name="timeIn" className="w-full p-3 sm:p-4 bg-stone-800 border border-stone-700 rounded-xl focus:ring-2 focus:ring-[#991b1f] focus:border-[#991b1f] text-stone-100 text-sm sm:text-base [color-scheme:dark] transition-all" />
+<input required type="time" name="timeIn" defaultValue={addForm.timeIn || ''} className="w-full p-3 sm:p-4 bg-stone-800 border border-stone-700 rounded-xl focus:ring-2 focus:ring-[#991b1f] focus:border-[#991b1f] text-stone-100 text-sm sm:text-base [color-scheme:dark] transition-all" />
 </div>
 <div>
 <label className="block text-xs sm:text-sm font-bold text-stone-400 mb-1.5 sm:mb-2">Time Out</label>
-<input required type="time" name="timeOut" className="w-full p-3 sm:p-4 bg-stone-800 border border-stone-700 rounded-xl focus:ring-2 focus:ring-[#991b1f] focus:border-[#991b1f] text-stone-100 text-sm sm:text-base [color-scheme:dark] transition-all" />
+<input required type="time" name="timeOut" defaultValue={addForm.timeOut || ''} className="w-full p-3 sm:p-4 bg-stone-800 border border-stone-700 rounded-xl focus:ring-2 focus:ring-[#991b1f] focus:border-[#991b1f] text-stone-100 text-sm sm:text-base [color-scheme:dark] transition-all" />
 </div>
 </div>
 <div className="pt-4 sm:pt-6">
@@ -1188,7 +1788,7 @@ filteredJobs.map(job => (
 <img src={getDirectImageUrl(job.imageUrl)} alt={job.name} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" />
 <div className="absolute inset-0 bg-gradient-to-t from-stone-950/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
 </>
-) : <ImageIcon className="w-6 h-6 sm:w-8 sm:h-8 text-stone-600" />}
+) : <span className="text-xl font-bold text-stone-600">{job.id.substring(0, 2)}</span>}
 </div>
 <div className="flex flex-col overflow-hidden min-w-0">
 <span className="px-2 py-0.5 sm:px-2.5 sm:py-1 bg-stone-800 text-stone-300 rounded text-[10px] sm:text-xs font-bold mb-1 sm:mb-1.5 w-max tracking-wider">{job.id}</span>
@@ -1249,11 +1849,12 @@ return (
 </div>
 
 {/* Scrollable Main Area */}
-<div className="flex-1 overflow-y-auto w-full relative">
+<div className={`flex-1 w-full relative ${view === 'MY_LOGS' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto'}`}>
 {!isGlobalUnlocked ? renderGlobalPinScreen() : (
 <>
 {view === 'HOME' && renderHome()}
 {view === 'PIN' && renderPinScreen()}
+{view === 'UPDATE_PIN' && renderUpdatePin()}
 {view === 'DASHBOARD' && renderDashboard()}
 {view === 'SELECT_JOB' && renderSelectJob()}
 {view === 'MY_LOGS' && renderMyLogs()}
@@ -1281,6 +1882,26 @@ Understood
 </div>
 </div>
 )}
+
+{/* INACTIVITY WARNING MODAL */}
+{showInactivityWarning && (
+<div className="absolute inset-0 z-[110] flex items-center justify-center bg-stone-950/90 backdrop-blur-md p-4 transition-all">
+<div className="bg-stone-900 border border-amber-500/50 p-6 sm:p-10 rounded-3xl shadow-[0_0_50px_rgba(245,158,11,0.2)] max-w-sm w-full flex flex-col items-center text-center animate-pulse">
+<div className="w-20 h-20 bg-amber-500/10 text-amber-500 border border-amber-500/20 rounded-full flex items-center justify-center mb-6 shadow-inner">
+<Clock className="w-10 h-10" />
+</div>
+<h3 className="text-3xl font-bold font-crimson text-stone-100 mb-3">Are you still there?</h3>
+<p className="text-stone-400 mb-8 text-lg">Returning to home screen in <span className="text-amber-400 font-bold">{inactivitySecondsLeft}</span> seconds.</p>
+<button 
+onClick={() => { Feedback.tap(); lastActivityRef.current = Date.now(); setShowInactivityWarning(false); }}
+className="w-full py-4 bg-amber-600 hover:bg-amber-500 text-stone-950 font-bold rounded-xl active:scale-95 transition-all shadow-lg text-lg"
+>
+I'm still here
+</button>
+</div>
+</div>
+)}
+
 </div>
 );
 }
